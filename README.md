@@ -23,6 +23,8 @@ An asynchronous, dual-accelerator pairing framework and terminal copilot built o
   * Discovers `.agents/hooks.json` and `~/.gemini/config/hooks.json`, executing `PreToolUse` security gates, parameter overwrites, and `PostToolUse` linters.
 * **Autonomous Spec-Driven Workflow (`brainstorm.py` / `/brainstorm`)**:
   * Hybrid pipeline: Cloud Gemini (architecture & spec) ➔ User Approval ➔ AMD ROCm (implementation & self-healing test run) ➔ Local & Cloud Dual Review ➔ User Approval ➔ Git Commit.
+* **Live Web Search & Documentation Scraper (`web_search.py` / `/search`, `/fetch`)**:
+  * Zero external pip dependencies: multi-source live web search (DuckDuckGo + GitHub) and HTML-to-clean-Markdown webpage extractor.
 * **Universal MCP Server Support**:
   * Discovers Antigravity native, VS Code-compatible, and local Kontexta MCP tools.
 * **Google Cloud Gemini Fallback**:
@@ -43,6 +45,7 @@ Projects/myagy/
 ├── instructions.py       # GEMINI.md / antigravity.md context discovery & injection
 ├── hooks_loader.py       # Lifecycle hooks loader (hooks.json Pre/Post tool gates)
 ├── brainstorm.py         # End-to-end spec-driven brainstorm-to-commit lifecycle
+├── web_search.py         # Live DuckDuckGo/GitHub search & HTML-to-markdown reader
 ├── laya.py               # Laya System 1 ModernBERT decision protocol
 ├── llamashift.py         # Port telemetry, model catalog & hot-swapping
 ├── mcp_loader.py         # Native, VS Code, and Kontexta MCP discovery
@@ -114,5 +117,7 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/load <name>` | Restore a previous conversation session |
 | `/permissions auto` | Enable Laya dynamic safety gating (`/noul` P(Safe) ≥ 0.90) |
 | `/brainstorm <idea>` | Autonomous Spec-Driven Loop (Cloud Spec ➔ ROCm Build ➔ Dual Review ➔ Commit) |
+| `/search <query>` | Live web search (DuckDuckGo + GitHub) with clean formatted snippets |
+| `/fetch <url>` | Fetch web documentation and distill HTML into clean Markdown |
 | `/reload` | Hot-reload code in-place preserving context |
 | `/help` | Display full command reference |

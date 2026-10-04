@@ -432,8 +432,10 @@ class MultiGpuHybridSession:
             "2. DIRECT ACTION: Analyze findings silently and proceed directly to the necessary action. Every turn must make tangible "
             "progress with real tool calls or a concise final resolution.\n"
             "3. NO REDUNDANT CALLS: Do not re-run the same command or re-read the same file if you already have the result.\n"
-            "4. ERROR HANDLING: If a tool fails or reports an error, inspect the output and correct your approach in the next tool call.\n"
-            "5. COMPLETION: Once your task is finished, output a crisp, formatted markdown summary of your findings or changes, and STOP calling tools."
+            "4. WEB RESEARCH: When dealing with unfamiliar external libraries, modern API deprecations, or unexpected errors, "
+            "search the web (e.g. search_web, read_url_content) or inspect online documentation before guessing.\n"
+            "5. ERROR HANDLING: If a tool fails or reports an error, inspect the output and correct your approach in the next tool call.\n"
+            "6. COMPLETION: Once your task is finished, output a crisp, formatted markdown summary of your findings or changes, and STOP calling tools."
         )
 
         # Automatic project instructions injection (GEMINI.md, antigravity.md, etc.)
@@ -1567,9 +1569,12 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/repomap [path]{r}       : Generate AST symbol map of codebase classes & functions")
         print(f"{g}│{r}   {c}/instructions [view]{r}   : Inspect or toggle auto-injected GEMINI.md / antigravity.md")
         print(f"{g}│{r}   {c}/hooks [view|refresh]{r}  : Inspect, reload or toggle lifecycle hooks (hooks.json)")
-        print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Autonomous Spec-Driven Workflow:{r}")
         print(f"{g}│{r}   {c}/brainstorm <idea>{r}    : Full Cloud Spec ➔ Approval ➔ ROCm Build ➔ Dual Review ➔ Commit")
+        print(f"{g}│{r}")
+        print(f"{g}│{r} {UI.BOLD}Web Search & Live Documentation:{r}")
+        print(f"{g}│{r}   {c}/search <query>{r}       : Live web search (DuckDuckGo + GitHub) with clean snippets")
+        print(f"{g}│{r}   {c}/fetch <url>{r}          : Fetch webpage & convert HTML to clean markdown text")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Scripting & Output Formatting:{r}")
         print(f"{g}│{r}   {c}/json{r}                : Toggle structured JSON output mode")

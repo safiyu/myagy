@@ -597,6 +597,27 @@ async def interactive_loop(session: MultiGpuHybridSession):
                     else:
                         print(f"{UI.GRAY}Usage: /hooks [on|off|refresh|view]{UI.RST}")
 
+                elif cmd in ("/search", "/web", "/google", "/ddg"):
+                    from .web_search import WebSearchEngine
+                    if not arg:
+                        print(f"{UI.GRAY}Usage: /search <query to search online>{UI.RST}")
+                    else:
+                        print(f"{UI.CYAN}Searching the web for '{arg}'...{UI.RST}")
+                        results = await asyncio.to_thread(WebSearchEngine.search, arg, 5)
+                        WebSearchEngine.print_search_results(arg, results)
+
+                elif cmd in ("/fetch", "/browse", "/readurl"):
+                    from .web_search import WebSearchEngine
+                    if not arg:
+                        print(f"{UI.GRAY}Usage: /fetch <url to inspect>{UI.RST}")
+                    else:
+                        print(f"{UI.CYAN}Fetching and distilling {arg}...{UI.RST}")
+                        content = await asyncio.to_thread(WebSearchEngine.fetch_url, arg, 4000)
+                        print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}WEBPAGE CONTENT ({arg}){UI.RST}{UI.DARK_GRAY} ─────────────────────────────╮{UI.RST}")
+                        for line in content.splitlines():
+                            print(f"{UI.DARK_GRAY}│{UI.RST}  {line}")
+                        print(f"{UI.DARK_GRAY}╰────────────────────────────────────────────────────────────────────────╯\n")
+
                 elif cmd in ("/steps", "/maxsteps", "/max-steps"):
                     arg_low = arg.lower()
                     if arg_low in ("off", "disable", "unlimited", "none", "0"):
