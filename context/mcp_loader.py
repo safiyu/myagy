@@ -5,8 +5,8 @@ import json
 from typing import List
 
 from google.antigravity.types import McpStdioServer, McpStreamableHttpServer
-from .config import MCP_CONFIG_PATH, KONTEXTA_MCP_PATH, KONTEXTA_DATA_DIR, OAUTH_TOKEN_PATH
-from .ui import UI
+from ..config import MCP_CONFIG_PATH, KONTEXTA_MCP_PATH, KONTEXTA_DATA_DIR, OAUTH_TOKEN_PATH
+from ..terminal.ui import UI
 
 
 def load_mcp_servers() -> List[McpStdioServer | McpStreamableHttpServer]:

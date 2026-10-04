@@ -29,28 +29,28 @@ try:
 except ImportError:
     pass
 
-from .config import (
+from ..config import (
     SESSIONS_DIR,
     DEFAULT_MODEL_DIR,
     DEFAULT_ENDPOINTS,
     DEFAULT_CLOUD_MODEL,
     DEFAULT_LAYA_ENDPOINT,
 )
-from .ui import UI, RICH_AVAILABLE, console
+from ..terminal.ui import UI, RICH_AVAILABLE, console
 from .llamashift import (
     detect_port_model,
     trigger_llamashift_switch,
     get_llamashift_active,
     get_llamashift_models,
 )
-from .mcp_loader import load_mcp_servers, check_oauth_available
+from ..context.mcp_loader import load_mcp_servers, check_oauth_available
 from .laya import LayaDecisionEngine
-from .compactor import ContextCurator
+from ..agents.compactor import ContextCurator
 from .coordinator import CudaCoordinator
-from .subagent import SubagentManager, SubagentTask
-from .repomap import RepoMap
-from .instructions import ProjectInstructions
-from .hooks_loader import ExternalHooksManager
+from ..agents.subagent import SubagentManager, SubagentTask
+from ..context.repomap import RepoMap
+from ..context.instructions import ProjectInstructions
+from ..context.hooks_loader import ExternalHooksManager
 
 
 class MultiGpuHybridSession:

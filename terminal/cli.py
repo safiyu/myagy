@@ -16,14 +16,14 @@ try:
 except ImportError:
     pass
 
-from .config import (
+from ..config import (
     MCP_CONFIG_PATH,
     DEFAULT_CLOUD_MODEL,
 )
 from .ui import UI, RICH_AVAILABLE, console
-from .llamashift import trigger_llamashift_switch
-from .mcp_loader import load_mcp_servers, McpStdioServer
-from .session import MultiGpuHybridSession
+from ..core.llamashift import trigger_llamashift_switch
+from ..context.mcp_loader import load_mcp_servers, McpStdioServer
+from ..core.session import MultiGpuHybridSession
 from .esc_listener import EscListener
 
 
@@ -499,7 +499,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                 elif cmd in ("/tasks", "/subagents"):
                     session.print_subagents()
                 elif cmd in ("/cuda", "/coordinator"):
-                    from .coordinator import CudaCoordinator
+                    from ..core.coordinator import CudaCoordinator
                     c_status = CudaCoordinator.status_summary()
                     st_col = UI.GREEN if c_status['state'] == 'idle' else (UI.CUDA_BOLD if c_status['state'] == 'subagent' else UI.AMBER)
                     print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}NVIDIA CUDA:9001 RESOURCE COORDINATOR{UI.RST}{UI.DARK_GRAY} ─────────────╮{UI.RST}")
@@ -523,7 +523,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         session.refresh_repomap(".")
                         print(UI.ok("Repository AST symbol map cache invalidated & refreshed."))
                     elif arg_low == "stats":
-                        from .repomap import RepoMap
+                        from ..context.repomap import RepoMap
                         st = RepoMap.cache_stats()
                         print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}REPO MAP CACHE TELEMETRY{UI.RST}{UI.DARK_GRAY} ─────────────────────────────╮{UI.RST}")
                         print(f"{UI.DARK_GRAY}│{UI.RST}  Auto-Inject : {UI.GREEN}ENABLED{UI.RST}" if session.auto_repomap else f"{UI.DARK_GRAY}│{UI.RST}  Auto-Inject : {UI.GRAY}DISABLED{UI.RST}")
@@ -537,7 +537,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(f"{UI.GRAY}Auto-injection status: {st_tag} │ Toggle: /repomap [on|off|refresh]{UI.RST}\n")
 
                 elif cmd in ("/instructions", "/rules", "/guidelines"):
-                    from .instructions import ProjectInstructions
+                    from ..context.instructions import ProjectInstructions
                     arg_low = arg.lower().strip()
                     if arg_low in ("on", "enable", "true"):
                         session.auto_instructions = True
@@ -564,7 +564,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(f"{UI.GRAY}Usage: /instructions [on|off|refresh|view]{UI.RST}")
 
                 elif cmd in ("/hooks", "/hook"):
-                    from .hooks_loader import ExternalHooksManager
+                    from ..context.hooks_loader import ExternalHooksManager
                     arg_low = arg.lower().strip()
                     if arg_low in ("on", "enable", "true"):
                         session.enable_hooks = True
@@ -599,7 +599,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(f"{UI.GRAY}Usage: /hooks [on|off|refresh|view]{UI.RST}")
 
                 elif cmd in ("/search", "/web", "/google", "/ddg"):
-                    from .web_search import WebSearchEngine
+                    from ..tools.web_search import WebSearchEngine
                     if not arg:
                         print(f"{UI.GRAY}Usage: /search <query to search online>{UI.RST}")
                     else:
@@ -608,7 +608,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         WebSearchEngine.print_search_results(arg, results)
 
                 elif cmd in ("/fetch", "/browse", "/readurl"):
-                    from .web_search import WebSearchEngine
+                    from ..tools.web_search import WebSearchEngine
                     if not arg:
                         print(f"{UI.GRAY}Usage: /fetch <url to inspect>{UI.RST}")
                     else:
@@ -685,7 +685,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         new_args.append("-y")
                     os.execv(sys.executable, new_args)
                 elif cmd in ("/brainstorm", "/spec", "/plan"):
-                    from .brainstorm import BrainstormWorkflow
+                    from ..agents.brainstorm import BrainstormWorkflow
                     _current_task = asyncio.create_task(BrainstormWorkflow.execute_workflow(arg, session, repo_root="."))
                     esc_listener = EscListener(
                         on_escape=lambda: loop.call_soon_threadsafe(

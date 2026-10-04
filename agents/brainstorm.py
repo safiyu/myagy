@@ -23,10 +23,10 @@ try:
 except ImportError:
     pass
 
-from .ui import UI, RICH_AVAILABLE, console
-from .config import PLANS_DIR
-from .repomap import RepoMap
-from .instructions import ProjectInstructions
+from ..terminal.ui import UI, RICH_AVAILABLE, console
+from ..config import PLANS_DIR
+from ..context.repomap import RepoMap
+from ..context.instructions import ProjectInstructions
 
 
 class BrainstormWorkflow:

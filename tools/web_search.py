@@ -20,7 +20,7 @@ try:
 except ImportError:
     pass
 
-from .ui import UI, RICH_AVAILABLE, console
+from ..terminal.ui import UI, RICH_AVAILABLE, console
 
 
 class WebSearchEngine:

@@ -6,7 +6,7 @@ import urllib.request
 import urllib.error
 from typing import Optional, List, Dict, Any
 
-from .config import DEFAULT_MODEL_DIR, DEFAULT_LLAMASHIFT_URL
+from ..config import DEFAULT_MODEL_DIR, DEFAULT_LLAMASHIFT_URL
 
 
 def detect_port_model(port: int | str, fallback_url: Optional[str] = None) -> Dict[str, Any]:

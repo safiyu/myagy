@@ -5,7 +5,7 @@ Automatically scans the repository root and standard customization directories t
 
 import os
 from typing import List, Optional, Tuple
-from .ui import UI
+from ..terminal.ui import UI
 
 
 # Canonical instruction file candidates in order of precedence

@@ -6,9 +6,9 @@ import asyncio
 import urllib.request
 from typing import Optional, List, Dict, Any
 
-from .ui import UI, RICH_AVAILABLE, console
-from .llamashift import trigger_llamashift_switch
-from .coordinator import CudaCoordinator
+from ..terminal.ui import UI, RICH_AVAILABLE, console
+from ..core.llamashift import trigger_llamashift_switch
+from ..core.coordinator import CudaCoordinator
 
 
 class ContextCurator:

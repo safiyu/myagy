@@ -15,7 +15,7 @@ import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 from google.antigravity import hooks, types
-from .ui import UI
+from ..terminal.ui import UI
 
 
 HOOKS_CANDIDATE_PATHS = [

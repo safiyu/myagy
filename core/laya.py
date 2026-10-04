@@ -4,7 +4,7 @@ import json
 import urllib.request
 from typing import Optional, List, Dict, Any
 
-from .config import DEFAULT_LAYA_ENDPOINT
+from ..config import DEFAULT_LAYA_ENDPOINT
 
 
 class LayaDecisionEngine:

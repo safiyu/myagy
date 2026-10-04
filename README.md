@@ -36,23 +36,35 @@ An asynchronous, dual-accelerator pairing framework and terminal copilot built o
 
 ```text
 Projects/myagy/
-├── config.py             # Ports, endpoints, directory constants
-├── ui.py                 # ANSI palette, styling, Rich console integration
-├── coordinator.py        # NVIDIA CUDA:9001 resource arbitrator
-├── subagent.py           # Background task delegation & context injection
-├── compactor.py          # Slot metrics & continuous rolling hippocampus curation
-├── repomap.py            # AST symbol mapping with fast mtime caching
-├── instructions.py       # GEMINI.md / antigravity.md context discovery & injection
-├── hooks_loader.py       # Lifecycle hooks loader (hooks.json Pre/Post tool gates)
-├── brainstorm.py         # End-to-end spec-driven brainstorm-to-commit lifecycle
-├── web_search.py         # Live DuckDuckGo/GitHub search & HTML-to-markdown reader
-├── laya.py               # Laya System 1 ModernBERT decision protocol
-├── llamashift.py         # Port telemetry, model catalog & hot-swapping
-├── mcp_loader.py         # Native, VS Code, and Kontexta MCP discovery
-├── session.py            # MultiGpuHybridSession cross-GPU orchestrator
-├── cli.py                # Multi-line prompt reader, slash commands & REPL
-├── __init__.py           # Package exports
-└── antigravity_agent.py  # Top-level executable runner & backward-compat wrapper
+├── antigravity_agent.py      # Top-level executable runner & backward-compat wrapper
+├── config.py                 # Ports, endpoints, directory constants
+├── launch_cuda_compactor.sh  # Script helper for dedicated compactor
+├── __init__.py               # Package root exports
+│
+├── core/                     # Core execution & multi-GPU routing engine
+│   ├── session.py            # MultiGpuHybridSession cross-GPU orchestrator
+│   ├── coordinator.py        # NVIDIA CUDA:9001 resource arbitrator
+│   ├── laya.py               # Laya System 1 ModernBERT decision protocol
+│   └── llamashift.py         # Port telemetry, model catalog & hot-swapping
+│
+├── agents/                   # Autonomous workflows & background agents
+│   ├── subagent.py           # Background task delegation & FIFO queue
+│   ├── compactor.py          # Continuous rolling hippocampus curation
+│   └── brainstorm.py         # Autonomous 5-phase brainstorm-to-commit workflow
+│
+├── context/                  # Workspace context & hooks discovery
+│   ├── repomap.py            # AST symbol mapping with fast mtime caching
+│   ├── instructions.py       # GEMINI.md / antigravity.md context injector
+│   ├── hooks_loader.py       # Lifecycle hooks loader (hooks.json)
+│   └── mcp_loader.py         # Native, VS Code, and Kontexta MCP discovery
+│
+├── tools/                    # Tool extensions & web scraping
+│   └── web_search.py         # Live DuckDuckGo/GitHub search & HTML-to-markdown reader
+│
+└── terminal/                 # Interactive UI & CLI experience
+    ├── cli.py                # Multi-line prompt reader, slash commands & REPL
+    ├── ui.py                 # ANSI palette, styling, Rich console integration
+    └── esc_listener.py       # Instant ESC-key interrupt listener
 ```
 
 ---

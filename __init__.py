@@ -16,54 +16,81 @@ from .config import (
     MCP_CONFIG_PATH,
     OAUTH_TOKEN_PATH,
 )
-from .ui import UI, RICH_AVAILABLE, console
-from .llamashift import (
+
+from .terminal import (
+    UI,
+    RICH_AVAILABLE,
+    console,
+    EscListener,
+    read_input_prompt,
+    interactive_loop,
+    main,
+)
+
+from .core import (
+    MultiGpuHybridSession,
+    CudaCoordinator,
+    LayaDecisionEngine,
     detect_port_model,
     query_endpoint_model,
     trigger_llamashift_switch,
     get_llamashift_active,
     get_llamashift_models,
 )
-from .mcp_loader import load_mcp_servers, check_oauth_available
-from .laya import LayaDecisionEngine
-from .compactor import ContextCurator
-from .coordinator import CudaCoordinator
-from .subagent import SubagentManager, SubagentTask
-from .repomap import RepoMap
-from .instructions import ProjectInstructions
-from .hooks_loader import ExternalHooksManager
-from .brainstorm import BrainstormWorkflow
-from .web_search import WebSearchEngine
-from .esc_listener import EscListener
-from .session import MultiGpuHybridSession
-from .cli import read_input_prompt, interactive_loop, main
+
+from .agents import (
+    SubagentManager,
+    SubagentTask,
+    ContextCurator,
+    BrainstormWorkflow,
+)
+
+from .context import (
+    RepoMap,
+    ProjectInstructions,
+    ExternalHooksManager,
+    load_mcp_servers,
+    check_oauth_available,
+    McpStdioServer,
+)
+
+from .tools import (
+    WebSearchEngine,
+)
 
 __all__ = [
+    # Core
     "MultiGpuHybridSession",
-    "EscListener",
-    "LayaDecisionEngine",
-    "ContextCurator",
     "CudaCoordinator",
-    "SubagentManager",
-    "SubagentTask",
-    "RepoMap",
-    "ProjectInstructions",
-    "ExternalHooksManager",
-    "BrainstormWorkflow",
-    "WebSearchEngine",
-    "UI",
-    "main",
-    "read_input_prompt",
-    "interactive_loop",
-    "load_mcp_servers",
-    "check_oauth_available",
+    "LayaDecisionEngine",
     "detect_port_model",
     "query_endpoint_model",
     "trigger_llamashift_switch",
     "get_llamashift_active",
     "get_llamashift_models",
+    # Agents
+    "SubagentManager",
+    "SubagentTask",
+    "ContextCurator",
+    "BrainstormWorkflow",
+    # Context
+    "RepoMap",
+    "ProjectInstructions",
+    "ExternalHooksManager",
+    "load_mcp_servers",
+    "check_oauth_available",
+    "McpStdioServer",
+    # Tools
+    "WebSearchEngine",
+    # Terminal & UI
+    "UI",
     "RICH_AVAILABLE",
     "console",
+    "EscListener",
+    "read_input_prompt",
+    "interactive_loop",
+    "main",
+    # Config
     "PORT_ROCM",
     "PORT_CUDA",
     "PORT_LLAMASHIFT",

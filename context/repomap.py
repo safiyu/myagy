@@ -4,7 +4,7 @@ import os
 import ast
 from typing import List, Dict, Any, Optional
 
-from .ui import UI, RICH_AVAILABLE, console
+from ..terminal.ui import UI, RICH_AVAILABLE, console
 
 try:
     from rich.tree import Tree

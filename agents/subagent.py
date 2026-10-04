@@ -21,9 +21,9 @@ try:
 except ImportError:
     pass
 
-from .ui import UI, RICH_AVAILABLE, console
-from .coordinator import CudaCoordinator
-from .llamashift import trigger_llamashift_switch
+from ..terminal.ui import UI, RICH_AVAILABLE, console
+from ..core.coordinator import CudaCoordinator
+from ..core.llamashift import trigger_llamashift_switch
 
 
 class SubagentTask:
