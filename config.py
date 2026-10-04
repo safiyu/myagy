@@ -9,6 +9,7 @@ KONTEXTA_MCP_PATH = os.path.expanduser("~/Projects/kontexta/apps/mcp/dist/index.
 KONTEXTA_DATA_DIR = os.path.expanduser("~/.local/share/kontexta")
 DEFAULT_MODEL_DIR = "/home/safiyu/models"
 OAUTH_TOKEN_PATH = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+PLANS_DIR = os.path.expanduser("~/.myagy/plans")
 
 # Default Service Endpoints & Ports
 PORT_ROCM = 9000

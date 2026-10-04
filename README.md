@@ -21,6 +21,8 @@ An asynchronous, dual-accelerator pairing framework and terminal copilot built o
   * Scans repository root for `GEMINI.md`, `antigravity.md`, `AGENTS.md` (or `.agents/` / `.gemini/` rules) and feeds project context into system memory on startup (<0.1ms mtime cached).
 * **Lifecycle Hooks Engine (`hooks_loader.py`)**:
   * Discovers `.agents/hooks.json` and `~/.gemini/config/hooks.json`, executing `PreToolUse` security gates, parameter overwrites, and `PostToolUse` linters.
+* **Autonomous Spec-Driven Workflow (`brainstorm.py` / `/brainstorm`)**:
+  * Hybrid pipeline: Cloud Gemini (architecture & spec) ➔ User Approval ➔ AMD ROCm (implementation & self-healing test run) ➔ Local & Cloud Dual Review ➔ User Approval ➔ Git Commit.
 * **Universal MCP Server Support**:
   * Discovers Antigravity native, VS Code-compatible, and local Kontexta MCP tools.
 * **Google Cloud Gemini Fallback**:
@@ -40,6 +42,7 @@ Projects/myagy/
 ├── repomap.py            # AST symbol mapping with fast mtime caching
 ├── instructions.py       # GEMINI.md / antigravity.md context discovery & injection
 ├── hooks_loader.py       # Lifecycle hooks loader (hooks.json Pre/Post tool gates)
+├── brainstorm.py         # End-to-end spec-driven brainstorm-to-commit lifecycle
 ├── laya.py               # Laya System 1 ModernBERT decision protocol
 ├── llamashift.py         # Port telemetry, model catalog & hot-swapping
 ├── mcp_loader.py         # Native, VS Code, and Kontexta MCP discovery
@@ -110,5 +113,6 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/save [name]` | Save conversation session state to disk |
 | `/load <name>` | Restore a previous conversation session |
 | `/permissions auto` | Enable Laya dynamic safety gating (`/noul` P(Safe) ≥ 0.90) |
+| `/brainstorm <idea>` | Autonomous Spec-Driven Loop (Cloud Spec ➔ ROCm Build ➔ Dual Review ➔ Commit) |
 | `/reload` | Hot-reload code in-place preserving context |
 | `/help` | Display full command reference |

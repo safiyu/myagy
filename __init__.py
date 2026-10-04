@@ -32,6 +32,7 @@ from .subagent import SubagentManager, SubagentTask
 from .repomap import RepoMap
 from .instructions import ProjectInstructions
 from .hooks_loader import ExternalHooksManager
+from .brainstorm import BrainstormWorkflow
 from .session import MultiGpuHybridSession
 from .cli import read_input_prompt, interactive_loop, main
 
@@ -45,6 +46,7 @@ __all__ = [
     "RepoMap",
     "ProjectInstructions",
     "ExternalHooksManager",
+    "BrainstormWorkflow",
     "UI",
     "main",
     "read_input_prompt",

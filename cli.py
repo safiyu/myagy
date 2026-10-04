@@ -662,6 +662,9 @@ async def interactive_loop(session: MultiGpuHybridSession):
                     if session.dangerously_skip_permissions:
                         new_args.append("-y")
                     os.execv(sys.executable, new_args)
+                elif cmd in ("/brainstorm", "/spec", "/plan"):
+                    from .brainstorm import BrainstormWorkflow
+                    await BrainstormWorkflow.execute_workflow(arg, session, repo_root=".")
                 elif cmd == "/help":
                     session.print_help()
                 else:
