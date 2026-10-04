@@ -34,11 +34,13 @@ from .instructions import ProjectInstructions
 from .hooks_loader import ExternalHooksManager
 from .brainstorm import BrainstormWorkflow
 from .web_search import WebSearchEngine
+from .esc_listener import EscListener
 from .session import MultiGpuHybridSession
 from .cli import read_input_prompt, interactive_loop, main
 
 __all__ = [
     "MultiGpuHybridSession",
+    "EscListener",
     "LayaDecisionEngine",
     "ContextCurator",
     "CudaCoordinator",

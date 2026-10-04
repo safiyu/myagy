@@ -24,6 +24,7 @@ from .ui import UI, RICH_AVAILABLE, console
 from .llamashift import trigger_llamashift_switch
 from .mcp_loader import load_mcp_servers, McpStdioServer
 from .session import MultiGpuHybridSession
+from .esc_listener import EscListener
 
 
 def read_input_prompt(first_prompt: str, multiline: bool = True) -> str:
@@ -86,14 +87,14 @@ async def interactive_loop(session: MultiGpuHybridSession):
             print(f"\n{UI.DARK_GRAY}╭──────────────────────────────────────────────────────────────────────────╮{UI.RST}")
             print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Antigravity Multi-GPU Hybrid Session{UI.RST}  {UI.ROCM}[ROCm]{UI.RST} {UI.DARK_GRAY}+{UI.RST} {UI.CUDA}[CUDA]{UI.RST} {UI.DARK_GRAY}+{UI.RST} {UI.CLOUD}[Cloud]{UI.RST}         {UI.DARK_GRAY}│{UI.RST}")
             print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.GRAY}Powered by Laya System 1 (ModernBERT) & Google Antigravity OAuth{UI.RST}       {UI.DARK_GRAY}│{UI.RST}")
-            print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.DIM}Multi-line input enabled (Enter on empty line to submit | /help for info){UI.RST}{UI.DARK_GRAY}│{UI.RST}")
+            print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.DIM}Multi-line input enabled (Enter on empty line to submit │ Esc stops agent){UI.RST} {UI.DARK_GRAY}│{UI.RST}")
             print(f"{UI.DARK_GRAY}╰──────────────────────────────────────────────────────────────────────────╯{UI.RST}")
         else:
             print("=" * 65)
             print(" Antigravity Multi-GPU Hybrid Session (ROCm + CUDA + Cloud)")
             print(" Powered by Laya System 1 Decision Model & Google OAuth")
-            print(" Multi-line input active by default (Enter on empty line to submit)")
-            print(" Type '/help' for commands. Ctrl+C cancels current request.")
+            print(" Multi-line input active (Enter on empty line to submit)")
+            print(" Press Esc to immediately stop agent generation. Type '/help' for info.")
             print("=" * 65)
         session.print_status()
 
@@ -685,7 +686,19 @@ async def interactive_loop(session: MultiGpuHybridSession):
                     os.execv(sys.executable, new_args)
                 elif cmd in ("/brainstorm", "/spec", "/plan"):
                     from .brainstorm import BrainstormWorkflow
-                    await BrainstormWorkflow.execute_workflow(arg, session, repo_root=".")
+                    _current_task = asyncio.create_task(BrainstormWorkflow.execute_workflow(arg, session, repo_root="."))
+                    esc_listener = EscListener(
+                        on_escape=lambda: loop.call_soon_threadsafe(
+                            lambda: _current_task.cancel() if _current_task and not _current_task.done() else None
+                        )
+                    )
+                    try:
+                        with esc_listener:
+                            await _current_task
+                    except asyncio.CancelledError:
+                        print(f"\n{UI.AMBER_BOLD}[Esc]{UI.RST} {UI.AMBER}Brainstorm workflow stopped by user.{UI.RST}\n")
+                    finally:
+                        _current_task = None
                 elif cmd == "/help":
                     session.print_help()
                 else:
@@ -738,23 +751,35 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         force_target = matched["id"]
                     prompt = rest_prompt.strip()
 
-            # Run chat as a cancellable task
+            # Run chat as a cancellable task with ESC-key interrupt support
             _current_task = asyncio.create_task(session.chat(prompt, force_target=force_target))
+            esc_listener = EscListener(
+                on_escape=lambda: loop.call_soon_threadsafe(
+                    lambda: _current_task.cancel() if _current_task and not _current_task.done() else None
+                )
+            )
             try:
-                await _current_task
+                with esc_listener:
+                    await _current_task
             except asyncio.CancelledError:
                 if session.json_output:
-                    print(json.dumps({"status": "cancelled", "prompt": prompt}, indent=2))
+                    print(json.dumps({"status": "cancelled", "interrupted_by": "esc" if esc_listener.interrupted else "sigint", "prompt": prompt}, indent=2))
                 else:
-                    print(f"\n{UI.AMBER}[Cancelled] Request stopped. Resuming prompt.{UI.RST}", flush=True)
+                    if esc_listener.interrupted:
+                        print(f"\n{UI.AMBER_BOLD}[Esc]{UI.RST} {UI.AMBER}Interrupted by user. Resuming prompt.{UI.RST}\n", flush=True)
+                    else:
+                        print(f"\n{UI.AMBER}[Cancelled] Request stopped. Resuming prompt.{UI.RST}\n", flush=True)
                 session._active_local_agent = None
             except Exception as e:
                 err = str(e)
-                if "CancelledError" in err or "cancelled" in err.lower():
+                if "CancelledError" in err or "cancelled" in err.lower() or esc_listener.interrupted:
                     if session.json_output:
-                        print(json.dumps({"status": "cancelled", "prompt": prompt}, indent=2))
+                        print(json.dumps({"status": "cancelled", "interrupted_by": "esc" if esc_listener.interrupted else "exception", "prompt": prompt}, indent=2))
                     else:
-                        print(f"\n{UI.AMBER}[Cancelled] Request stopped.{UI.RST}", flush=True)
+                        if esc_listener.interrupted:
+                            print(f"\n{UI.AMBER_BOLD}[Esc]{UI.RST} {UI.AMBER}Interrupted by user. Resuming prompt.{UI.RST}\n", flush=True)
+                        else:
+                            print(f"\n{UI.AMBER}[Cancelled] Request stopped.{UI.RST}\n", flush=True)
                     session._active_local_agent = None
                 else:
                     if session.json_output:

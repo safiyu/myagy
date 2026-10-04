@@ -1540,6 +1540,8 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}@cloud <prompt>{r}     : Route single prompt to Cloud Gemini")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Multi-line Input & Controls:{r}")
+        print(f"{g}│{r}   {c}<Esc>{r}                  : Instantly stop model generation and regain prompt control")
+        print(f"{g}│{r}   {c}<Ctrl+C>{r}               : Cancel current generation (press twice at prompt to exit)")
         print(f"{g}│{r}   {c}<Enter on empty line>{r}: Submit multi-line prompt (or press Ctrl+D)")
         print(f"{g}│{r}   {c}/multiline [on|off]{r}  : Toggle multi-line input mode (default: ON)")
         print(f"{g}│{r}   {c}/singleline{r}          : Switch to single-line prompt mode")

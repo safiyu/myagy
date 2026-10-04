@@ -121,3 +121,13 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/fetch <url>` | Fetch web documentation and distill HTML into clean Markdown |
 | `/reload` | Hot-reload code in-place preserving context |
 | `/help` | Display full command reference |
+
+### Keyboard & Execution Controls
+
+| Key / Shortcut | Action |
+| :--- | :--- |
+| `<Esc>` | **Instant Interrupt:** Immediately aborts model generation or running tools and returns to the prompt (just like Claude Code and Antigravity) without process signals. |
+| `<Ctrl+C>` | Cancels running request during execution; press twice at the input prompt to cleanly exit. |
+| `<Enter>` on empty line | Submits multi-line prompt input. |
+| `<Ctrl+D>` | Alternative instant submit for multi-line inputs. |
+
