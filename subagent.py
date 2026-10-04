@@ -1,4 +1,7 @@
-"""Subagent delegation engine: Asynchronously executes on-demand background engineering tasks on NVIDIA RTX 4060."""
+"""
+Subagent delegation engine: Asynchronously queues and executes on-demand background engineering tasks
+strictly 1-at-a-time on the NVIDIA RTX 4060 accelerator to honor VRAM and compute constraints.
+"""
 
 import time
 import json
@@ -7,13 +10,9 @@ import urllib.request
 from typing import Optional, List, Dict, Any
 
 from google.antigravity import (
-    Agent,
-    LocalOpenAIAgentConfig,
-    CapabilitiesConfig,
     hooks,
     types,
 )
-from google.antigravity.hooks import policy
 
 try:
     from rich.table import Table
@@ -33,7 +32,7 @@ class SubagentTask:
     def __init__(self, task_id: int, description: str):
         self.id = task_id
         self.description = description
-        self.status = "pending"  # pending | running | completed | failed | cancelled
+        self.status = "queued"  # queued | running | completed | failed | cancelled
         self.created_at = time.time()
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
@@ -56,10 +55,23 @@ class SubagentTask:
 
 
 class SubagentManager:
-    """Manages the lifecycle, execution queue, and context injection of background subagents."""
+    """Manages the FIFO execution queue, sequential execution, and context injection of background subagents."""
 
     _tasks: List[SubagentTask] = []
     _next_id: int = 1
+    _queue: asyncio.Queue = None
+    _worker_loop_task: Optional[asyncio.Task] = None
+    _active_task: Optional[SubagentTask] = None
+    _session: Any = None
+
+    @classmethod
+    def _ensure_queue_init(cls, session: Any):
+        """Initializes the asyncio FIFO queue and background dispatcher if not already running."""
+        cls._session = session
+        if cls._queue is None:
+            cls._queue = asyncio.Queue()
+        if cls._worker_loop_task is None or cls._worker_loop_task.done():
+            cls._worker_loop_task = asyncio.create_task(cls._queue_dispatcher())
 
     @classmethod
     def list_tasks(cls) -> List[SubagentTask]:
@@ -73,39 +85,66 @@ class SubagentManager:
         return None
 
     @classmethod
+    def get_queue_status(cls) -> Dict[str, Any]:
+        """Returns statistics on active, queued, and completed subagents."""
+        queued_count = sum(1 for t in cls._tasks if t.status == "queued")
+        running_count = sum(1 for t in cls._tasks if t.status == "running")
+        completed_count = sum(1 for t in cls._tasks if t.status == "completed")
+        failed_count = sum(1 for t in cls._tasks if t.status == "failed")
+        return {
+            "queued": queued_count,
+            "running": running_count,
+            "completed": completed_count,
+            "failed": failed_count,
+            "active_task": cls._active_task.to_dict() if cls._active_task else None,
+        }
+
+    @classmethod
     def spawn(cls, description: str, session: Any) -> SubagentTask:
         """
-        Spawns a new subagent task in the background on NVIDIA CUDA:9001.
-        Preempts any active background compaction so the subagent gets immediate execution.
+        Enqueues a subagent task. If the NVIDIA GPU is currently idle, it begins executing immediately.
+        If a task is already running, this task queues in FIFO order, guaranteeing strict 1-at-a-time execution.
         """
+        cls._ensure_queue_init(session)
+
         task = SubagentTask(task_id=cls._next_id, description=description)
         cls._next_id += 1
         cls._tasks.append(task)
 
-        # Synchronously reserve CUDA 9001 lock immediately to pause background compaction
-        CudaCoordinator.reserve_for_subagent()
+        # Enqueue for serialized execution
+        cls._queue.put_nowait(task)
 
-        # Launch worker coroutine in background without blocking the interactive CLI
-        task._async_task = asyncio.create_task(cls._run_worker(task, session))
-
+        queued_ahead = sum(1 for t in cls._tasks if t.status == "queued") - 1
         if not session.json_output:
-            print(f"\n{UI.CUDA_BOLD}⚡ [Subagent #{task.id} Launched]{UI.RST} {UI.WHITE}{description}{UI.RST}")
-            print(f"{UI.DARK_GRAY}   Target: NVIDIA RTX 4060 (:9001) │ Background Compactor paused. Type {UI.CYAN}/tasks{UI.DARK_GRAY} to check status.{UI.RST}\n", flush=True)
+            if queued_ahead > 0:
+                print(f"\n{UI.CUDA_BOLD}⚡ [Subagent #{task.id} Queued (Position #{queued_ahead + 1})]{UI.RST} {UI.WHITE}{description}{UI.RST}")
+                print(f"{UI.DARK_GRAY}   Enqueued behind active task. Strict 1-at-a-time execution on NVIDIA RTX 4060. Type {UI.CYAN}/tasks{UI.DARK_GRAY} to view queue.{UI.RST}\n", flush=True)
+            else:
+                print(f"\n{UI.CUDA_BOLD}⚡ [Subagent #{task.id} Launched]{UI.RST} {UI.WHITE}{description}{UI.RST}")
+                print(f"{UI.DARK_GRAY}   Target: NVIDIA RTX 4060 (:9001) │ Background Compactor paused. Type {UI.CYAN}/tasks{UI.DARK_GRAY} to check status.{UI.RST}\n", flush=True)
 
         return task
 
     @classmethod
     def cancel(cls, task_id: int) -> bool:
+        """Cancels a subagent task whether it is running or waiting in the FIFO queue."""
         task = cls.get(task_id)
         if not task:
             return False
-        if task.status in ("pending", "running") and task._async_task and not task._async_task.done():
+
+        if task.status == "queued":
+            task.status = "cancelled"
+            task.finished_at = time.time()
+            return True
+
+        if task.status == "running" and task._async_task and not task._async_task.done():
             task._async_task.cancel()
             task.status = "cancelled"
             task.finished_at = time.time()
             if task.started_at:
                 task.duration = task.finished_at - task.started_at
             return True
+
         return False
 
     @classmethod
@@ -132,13 +171,70 @@ class SubagentManager:
         return True
 
     @classmethod
+    def inject_all(cls, session: Any) -> int:
+        """Injects all uninjected completed subagent results into the session context in one shot."""
+        completed_uninjected = [t for t in cls._tasks if t.status == "completed" and not t.injected]
+        if not completed_uninjected:
+            return 0
+
+        entries = []
+        for t in completed_uninjected:
+            entries.append({
+                "role": "user",
+                "target": session.active_target,
+                "content": f"[SYSTEM: Subagent #{t.id} Autonomous Findings on \"{t.description}\"]\n{t.result}",
+            })
+            t.injected = True
+
+        entries.append({
+            "role": "assistant",
+            "target": session.active_target,
+            "content": f"[SYSTEM: Acknowledged findings from {len(completed_uninjected)} background subagent(s). Ready to apply collective insights.]",
+        })
+
+        session.history.extend(entries)
+        session._active_local_agent = None
+        return len(completed_uninjected)
+
+    @classmethod
+    async def _queue_dispatcher(cls):
+        """
+        Background loop that pulls subagents from the FIFO queue and executes them strictly one-at-a-time.
+        Prevents dual-subagent VRAM contention on NVIDIA RTX 4060.
+        """
+        while True:
+            try:
+                task: SubagentTask = await cls._queue.get()
+                if task.status == "cancelled":
+                    cls._queue.task_done()
+                    continue
+
+                cls._active_task = task
+                # Synchronously acquire lock so compactor yields
+                CudaCoordinator.reserve_for_subagent()
+
+                task._async_task = asyncio.create_task(cls._run_worker(task, cls._session))
+                try:
+                    await task._async_task
+                except asyncio.CancelledError:
+                    task.status = "cancelled"
+                finally:
+                    cls._active_task = None
+                    cls._queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await asyncio.sleep(1.0)
+
+    @classmethod
     async def _run_worker(cls, task: SubagentTask, session: Any):
         """Worker executing autonomously on NVIDIA RTX 4060 with tool access."""
         task.started_at = time.time()
         task.status = "running"
 
         try:
-            # 2. Ensure Port 9001 is online (auto-wake via llama-launcher if needed)
+            # 1. Ensure Port 9001 is online (auto-wake via llama-launcher if needed)
             ep9001 = session.endpoints.get("9001", {})
             if ep9001.get("status") != "online":
                 try:
@@ -156,7 +252,7 @@ class SubagentManager:
             if ep9001.get("status") != "online":
                 raise RuntimeError("NVIDIA RTX 4060 (Port 9001) is offline. Start it via llama-launcher or /compactor start.")
 
-            # 3. Create tool hook to capture tool executions
+            # 2. Hook to capture tool executions
             @hooks.pre_tool_call_decide
             def log_tool(call: types.ToolCall) -> types.HookResult:
                 c_name = getattr(call, "name", str(call))
@@ -174,7 +270,7 @@ class SubagentManager:
                 "3. Preserve file paths, function names, and exact numbers."
             )
 
-            # 4. Execute on NVIDIA RTX 4060 (:9001) via high-speed chat completion
+            # 3. Execute on NVIDIA RTX 4060 (:9001) via high-speed chat completion
             payload = {
                 "model": ep9001.get("filename") or "granite-4.2-8b",
                 "messages": [
@@ -191,7 +287,6 @@ class SubagentManager:
                 headers={"Content-Type": "application/json"},
             )
 
-            # Run in thread so asyncio event loop remains non-blocking for user
             def _call_http():
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     return json.loads(resp.read().decode("utf-8"))
@@ -207,7 +302,6 @@ class SubagentManager:
             else:
                 raise RuntimeError("Port 9001 returned empty response")
 
-
         except asyncio.CancelledError:
             task.status = "cancelled"
         except Exception as e:
@@ -218,29 +312,31 @@ class SubagentManager:
         finally:
             task.finished_at = time.time()
             task.duration = round((task.finished_at - task.started_at), 2) if task.started_at else 0.0
-            # 5. Release CUDA lock back to idle
+            # Release lock back to idle coordinator
             await CudaCoordinator.release_from_subagent()
 
-            # 6. Notify user in terminal
+            # Terminal notification
             if not session.json_output:
+                queued_left = sum(1 for t in cls._tasks if t.status == "queued")
+                queue_suffix = f" {UI.AMBER}({queued_left} next in queue){UI.RST}" if queued_left > 0 else ""
                 if task.status == "completed":
                     print(
                         f"\n{UI.GREEN_BOLD}✓ [Subagent #{task.id} Completed]{UI.RST} "
                         f"{UI.WHITE}{task.description[:55]}{UI.RST} "
-                        f"{UI.GRAY}(in {task.duration:.1f}s via RTX 4060){UI.RST}\n"
+                        f"{UI.GRAY}(in {task.duration:.1f}s via RTX 4060){UI.RST}{queue_suffix}\n"
                         f"{UI.DARK_GRAY}   ➔ Type {UI.CYAN}/subagent view {task.id}{UI.DARK_GRAY} to inspect result or {UI.CYAN}/subagent inject {task.id}{UI.DARK_GRAY} to add to session history.{UI.RST}\n",
                         flush=True,
                     )
                 elif task.status == "failed":
                     print(
                         f"\n{UI.RED_BOLD}✗ [Subagent #{task.id} Failed]{UI.RST} "
-                        f"{UI.WHITE}{task.description[:55]}{UI.RST}: {UI.RED}{task.error}{UI.RST}\n",
+                        f"{UI.WHITE}{task.description[:55]}{UI.RST}: {UI.RED}{task.error}{UI.RST}{queue_suffix}\n",
                         flush=True,
                     )
 
     @classmethod
     def print_tasks(cls, session: Any):
-        """Renders an interactive status table of all background subagents."""
+        """Renders an interactive status table of all background subagents with FIFO queue ordering."""
         if not cls._tasks:
             print(f"\n{UI.GRAY}(no background subagents spawned. Use /spawn <task> to delegate){UI.RST}\n")
             return
@@ -254,15 +350,18 @@ class SubagentManager:
         else:
             c_badge = f"{UI.AMBER}COMPACTING{UI.RST}"
 
+        queued_tasks = sum(1 for t in cls._tasks if t.status == "queued")
+        queue_tag = f" │ Queue: {UI.AMBER}{queued_tasks} waiting{UI.RST}" if queued_tasks > 0 else f" │ Queue: {UI.GREEN}Empty{UI.RST}"
+
         if RICH_AVAILABLE and not session.json_output:
             table = Table(
-                title=Text.from_ansi(f"{UI.WHITE}BACKGROUND SUBAGENTS ON NVIDIA RTX 4060{UI.RST} │ Port 9001: {c_badge}"),
+                title=Text.from_ansi(f"{UI.WHITE}BACKGROUND SUBAGENTS ON NVIDIA RTX 4060{UI.RST} │ Port 9001: {c_badge}{queue_tag}"),
                 box=box.ROUNDED,
                 header_style="bold cyan",
                 border_style="bright_black",
             )
             table.add_column("#", justify="center", style="bold dim", width=5)
-            table.add_column("Status", style="bold", width=12)
+            table.add_column("Status", style="bold", width=14)
             table.add_column("Duration", justify="right", width=9)
             table.add_column("Task Description", style="white")
             table.add_column("Result / Preview", style="dim")
@@ -278,7 +377,7 @@ class SubagentManager:
                 elif t.status == "failed":
                     st = f"{UI.RED}✗ FAILED{UI.RST}"
                 else:
-                    st = f"{UI.AMBER}… PENDING{UI.RST}"
+                    st = f"{UI.AMBER}⏳ QUEUED{UI.RST}"
 
                 dur_str = f"{t.duration:.1f}s" if t.duration is not None else (f"{time.time() - t.started_at:.1f}s" if t.started_at else "-")
                 preview = (t.result or t.error or "").replace("\n", " ").strip()
@@ -298,7 +397,7 @@ class SubagentManager:
 
             console.print()
             console.print(table)
-            console.print(f"{UI.GRAY}Commands: {UI.CYAN}/subagent view <#>{UI.GRAY} │ {UI.CYAN}/subagent inject <#>{UI.GRAY} │ {UI.CYAN}/subagent cancel <#>{UI.RST}\n")
+            console.print(f"{UI.GRAY}Commands: {UI.CYAN}/subagent view <#>{UI.GRAY} │ {UI.CYAN}/subagent inject <#|all>{UI.GRAY} │ {UI.CYAN}/subagent cancel <#>{UI.RST}\n")
         else:
             print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}BACKGROUND SUBAGENTS (NVIDIA CUDA:9001 [{c_badge}]){UI.RST}{UI.DARK_GRAY} ─────────────╮{UI.RST}")
             for t in cls._tasks:
@@ -325,7 +424,7 @@ class SubagentManager:
             for c in task.tool_calls:
                 print(f"{UI.DARK_GRAY}│{UI.RST}    • {UI.AMBER}{c['name']}{UI.RST}({json.dumps(c.get('args', {}))[:80]})")
         print(f"{UI.DARK_GRAY}│{UI.RST}\n{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Result Content:{UI.RST}")
-        res_text = task.result or task.error or "(no output yet)"
+        res_text = task.result or task.error or ("(waiting in queue...)" if task.status == "queued" else "(running...)")
         for line in res_text.splitlines():
             print(f"{UI.DARK_GRAY}│{UI.RST}    {line}")
         print(f"{UI.DARK_GRAY}╰────────────────────────────────────────────────────────────────────────╯")

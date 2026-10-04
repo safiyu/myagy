@@ -467,18 +467,27 @@ async def interactive_loop(session: MultiGpuHybridSession):
 
                     if sub_cmd == "view" and sub_arg.isdigit():
                         session.print_subagent_detail(int(sub_arg))
-                    elif sub_cmd == "inject" and sub_arg.isdigit():
-                        ok = session.inject_subagent(int(sub_arg))
-                        if ok:
-                            print(UI.ok(f"Subagent #{sub_arg} result successfully injected into conversation memory."))
+                    elif sub_cmd == "inject":
+                        if sub_arg.lower() in ("all", "*"):
+                            count = session.inject_all_subagents()
+                            if count > 0:
+                                print(UI.ok(f"Successfully injected findings from {count} completed subagent(s) into conversation context."))
+                            else:
+                                print(UI.warn("No uninjected completed subagents found to inject."))
+                        elif sub_arg.isdigit():
+                            ok = session.inject_subagent(int(sub_arg))
+                            if ok:
+                                print(UI.ok(f"Subagent #{sub_arg} result successfully injected into conversation memory."))
+                            else:
+                                print(UI.warn(f"Could not inject Subagent #{sub_arg}. Ensure it has finished and produced output."))
                         else:
-                            print(UI.warn(f"Could not inject Subagent #{sub_arg}. Ensure it has finished and produced output."))
+                            print(f"{UI.GRAY}Usage: /subagent inject <#|all>{UI.RST}")
                     elif sub_cmd in ("cancel", "kill", "stop") and sub_arg.isdigit():
                         ok = session.cancel_subagent(int(sub_arg))
                         if ok:
                             print(UI.ok(f"Subagent #{sub_arg} cancelled."))
                         else:
-                            print(UI.warn(f"Subagent #{sub_arg} is not running or not found."))
+                            print(UI.warn(f"Subagent #{sub_arg} is not running or not found in queue."))
                     elif sub_cmd == "list" or not arg:
                         session.print_subagents()
                     elif sub_cmd and sub_cmd.isdigit() and not sub_arg:

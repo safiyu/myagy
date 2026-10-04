@@ -93,11 +93,11 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/cloud` or `/gemini` | Route queries through Google Cloud Gemini via OAuth |
 | `/models` | List all local and cloud models in catalog |
 | `/model <# or id>` | Hot-swap active model on the fly |
-| `/spawn <task>` | Launch an autonomous background subagent on RTX 4060 |
-| `/tasks` | List all active and completed background subagents |
+| `/spawn <task>` | Enqueue background task on NVIDIA RTX 4060 (FIFO serialized) |
+| `/tasks` | List subagent execution queue, active task & progress |
 | `/subagent view <#>` | Inspect the complete result and tool calls of a subagent |
-| `/subagent inject <#>`| Inject subagent findings into current chat context |
-| `/subagent cancel <#>`| Cancel a running background subagent task |
+| `/subagent inject <#\|all>`| Inject subagent findings (single or all) into current chat context |
+| `/subagent cancel <#>`| Cancel a running or queued background subagent task |
 | `/cuda` | Show NVIDIA CUDA:9001 resource coordinator status |
 | `/repomap [path]` | Render the rich AST symbol tree of codebase classes & functions |
 | `/repomap on\|off` | Toggle automatic codebase outline injection into model memory |

@@ -291,6 +291,9 @@ class MultiGpuHybridSession:
     def inject_subagent(self, task_id: int) -> bool:
         return SubagentManager.inject(task_id, self)
 
+    def inject_all_subagents(self) -> int:
+        return SubagentManager.inject_all(self)
+
     def print_subagents(self):
         return SubagentManager.print_tasks(self)
 
