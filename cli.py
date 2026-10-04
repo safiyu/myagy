@@ -526,6 +526,33 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         st_tag = f"{UI.GREEN}Active (Auto-injected into model memory){UI.RST}" if session.auto_repomap else f"{UI.GRAY}Disabled{UI.RST}"
                         print(f"{UI.GRAY}Auto-injection status: {st_tag} │ Toggle: /repomap [on|off|refresh]{UI.RST}\n")
 
+                elif cmd in ("/instructions", "/rules", "/guidelines"):
+                    from .instructions import ProjectInstructions
+                    arg_low = arg.lower().strip()
+                    if arg_low in ("on", "enable", "true"):
+                        session.auto_instructions = True
+                        session._active_local_agent = None
+                        print(UI.ok("Automatic project instructions injection (GEMINI.md / antigravity.md) ENABLED."))
+                    elif arg_low in ("off", "disable", "false"):
+                        session.auto_instructions = False
+                        session._active_local_agent = None
+                        print(UI.ok("Automatic project instructions injection DISABLED."))
+                    elif arg_low in ("refresh", "reload"):
+                        content, loaded = ProjectInstructions.load_instructions(".", force_refresh=True)
+                        session._active_local_agent = None
+                        print(UI.ok(f"Project instructions refreshed. Loaded: {', '.join(loaded) if loaded else 'None'}"))
+                    elif arg_low in ("view", "show", "cat") or not arg:
+                        content, loaded = ProjectInstructions.load_instructions(".", force_refresh=False)
+                        if loaded:
+                            print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}PROJECT INSTRUCTIONS ({', '.join(loaded)}){UI.RST}{UI.DARK_GRAY} ─────────────╮{UI.RST}")
+                            for line in content.splitlines():
+                                print(f"{UI.DARK_GRAY}│{UI.RST}  {line}")
+                            print(f"{UI.DARK_GRAY}╰─────────────────────────────────────────────────────────────╯{UI.RST}\n")
+                        else:
+                            print(UI.warn("No instruction files found (looking for GEMINI.md, antigravity.md, AGENTS.md, etc.)"))
+                    else:
+                        print(f"{UI.GRAY}Usage: /instructions [on|off|refresh|view]{UI.RST}")
+
                 elif cmd in ("/steps", "/maxsteps", "/max-steps"):
                     arg_low = arg.lower()
                     if arg_low in ("off", "disable", "unlimited", "none", "0"):

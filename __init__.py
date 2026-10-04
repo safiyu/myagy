@@ -30,6 +30,7 @@ from .compactor import ContextCurator
 from .coordinator import CudaCoordinator
 from .subagent import SubagentManager, SubagentTask
 from .repomap import RepoMap
+from .instructions import ProjectInstructions
 from .session import MultiGpuHybridSession
 from .cli import read_input_prompt, interactive_loop, main
 
@@ -41,6 +42,7 @@ __all__ = [
     "SubagentManager",
     "SubagentTask",
     "RepoMap",
+    "ProjectInstructions",
     "UI",
     "main",
     "read_input_prompt",

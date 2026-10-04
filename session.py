@@ -49,6 +49,7 @@ from .compactor import ContextCurator
 from .coordinator import CudaCoordinator
 from .subagent import SubagentManager, SubagentTask
 from .repomap import RepoMap
+from .instructions import ProjectInstructions
 
 
 class MultiGpuHybridSession:
@@ -77,6 +78,7 @@ class MultiGpuHybridSession:
         self.multiline_input = multiline_input
         self.verbose = verbose
         self.auto_repomap: bool = True
+        self.auto_instructions: bool = True
 
         # Load MCP servers once at startup
         self._mcp_servers: List[McpStdioServer | McpStreamableHttpServer] = []
@@ -420,6 +422,16 @@ class MultiGpuHybridSession:
             "4. COMPLETION: Once you have executed the required tools and completed the task, STOP calling tools and provide your "
             "final response directly to the user."
         )
+
+        # Automatic project instructions injection (GEMINI.md, antigravity.md, etc.)
+        if self.auto_instructions:
+            proj_instr, loaded_files = ProjectInstructions.load_instructions(".")
+            if proj_instr:
+                base_inst += (
+                    f"\n\n[Project Guidelines & Context Files ({', '.join(loaded_files)})]\n"
+                    f"{proj_instr}\n"
+                    f"[End of Project Guidelines]\n"
+                )
 
         # Automatic repository symbol map injection
         if self.auto_repomap:
@@ -1169,6 +1181,9 @@ class MultiGpuHybridSession:
             table.add_row("Continuous Curation", Text.from_ansi(curation_badge))
             repomap_tag = f"{UI.GREEN}Active (Auto-injected into context){UI.RST}" if self.auto_repomap else f"{UI.GRAY}Disabled{UI.RST}"
             table.add_row("Codebase AST Map", Text.from_ansi(repomap_tag))
+            _, instr_files = ProjectInstructions.load_instructions(".")
+            instr_desc = f"{UI.GREEN}Loaded ({', '.join(instr_files)}){UI.RST}" if instr_files else (f"{UI.GREEN}Active (Scanning root){UI.RST}" if self.auto_instructions else f"{UI.GRAY}Disabled{UI.RST}")
+            table.add_row("Project Guidelines", Text.from_ansi(instr_desc))
             table.add_row("Cloud Model", Text.from_ansi(f"{UI.CLOUD}{self.cloud_model}{UI.RST}"))
             table.add_row("Cloud Auth", Text.from_ansi(auth_status))
             table.add_row("Multi-line Input", Text.from_ansi(ml_status))
@@ -1187,6 +1202,9 @@ class MultiGpuHybridSession:
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Compactor (CUDA :9001){UI.RST}: {m1_str}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Continuous Curation{UI.RST} : {curation_badge}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Codebase AST Map{UI.RST}    : {repomap_tag}")
+        _, instr_files = ProjectInstructions.load_instructions(".")
+        instr_desc = f"{UI.GREEN}Loaded ({', '.join(instr_files)}){UI.RST}" if instr_files else (f"{UI.GREEN}Active (Scanning root){UI.RST}" if self.auto_instructions else f"{UI.GRAY}Disabled{UI.RST}")
+        print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Project Guidelines{UI.RST}  : {instr_desc}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Cloud Model{UI.RST}         : {UI.CLOUD}{self.cloud_model}{UI.RST}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Cloud Auth{UI.RST}          : {auth_status}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Multi-line Input{UI.RST}    : {ml_status}")
@@ -1550,6 +1568,7 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/subagent cancel <#>{r}  : Cancel a running subagent task")
         print(f"{g}│{r}   {c}/cuda{r}                 : Show NVIDIA CUDA:9001 resource arbitrator state")
         print(f"{g}│{r}   {c}/repomap [path]{r}       : Generate AST symbol map of codebase classes & functions")
+        print(f"{g}│{r}   {c}/instructions [view]{r}   : Inspect or toggle auto-injected GEMINI.md / antigravity.md")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Scripting & Output Formatting:{r}")
         print(f"{g}│{r}   {c}/json{r}                : Toggle structured JSON output mode")
