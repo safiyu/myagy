@@ -50,6 +50,7 @@ from .coordinator import CudaCoordinator
 from .subagent import SubagentManager, SubagentTask
 from .repomap import RepoMap
 from .instructions import ProjectInstructions
+from .hooks_loader import ExternalHooksManager
 
 
 class MultiGpuHybridSession:
@@ -79,6 +80,7 @@ class MultiGpuHybridSession:
         self.verbose = verbose
         self.auto_repomap: bool = True
         self.auto_instructions: bool = True
+        self.enable_hooks: bool = True
 
         # Load MCP servers once at startup
         self._mcp_servers: List[McpStdioServer | McpStreamableHttpServer] = []
@@ -407,7 +409,14 @@ class MultiGpuHybridSession:
             else:
                 print(f"{UI.DARK_GRAY}  └── {UI.GREEN}✓ Completed{UI.RST}", flush=True)
 
-        return [loop_guard, on_tool_result]
+        all_hooks = [loop_guard, on_tool_result]
+
+        # External lifecycle hooks (hooks.json)
+        if self.enable_hooks:
+            ext_hooks = ExternalHooksManager.build_lifecycle_hooks(self, ".")
+            all_hooks.extend(ext_hooks)
+
+        return all_hooks
 
     def build_system_context(self, target: str) -> str:
         base_inst = (
@@ -1184,6 +1193,9 @@ class MultiGpuHybridSession:
             _, instr_files = ProjectInstructions.load_instructions(".")
             instr_desc = f"{UI.GREEN}Loaded ({', '.join(instr_files)}){UI.RST}" if instr_files else (f"{UI.GREEN}Active (Scanning root){UI.RST}" if self.auto_instructions else f"{UI.GRAY}Disabled{UI.RST}")
             table.add_row("Project Guidelines", Text.from_ansi(instr_desc))
+            hook_entries, hook_files = ExternalHooksManager.load_hook_configs(".")
+            hook_tag = f"{UI.GREEN}Active ({len(hook_entries)} hooks loaded from {', '.join(hook_files)}){UI.RST}" if hook_entries else (f"{UI.GREEN}Active (Scanning hooks.json){UI.RST}" if self.enable_hooks else f"{UI.GRAY}Disabled{UI.RST}")
+            table.add_row("Lifecycle Hooks", Text.from_ansi(hook_tag))
             table.add_row("Cloud Model", Text.from_ansi(f"{UI.CLOUD}{self.cloud_model}{UI.RST}"))
             table.add_row("Cloud Auth", Text.from_ansi(auth_status))
             table.add_row("Multi-line Input", Text.from_ansi(ml_status))
@@ -1205,6 +1217,9 @@ class MultiGpuHybridSession:
         _, instr_files = ProjectInstructions.load_instructions(".")
         instr_desc = f"{UI.GREEN}Loaded ({', '.join(instr_files)}){UI.RST}" if instr_files else (f"{UI.GREEN}Active (Scanning root){UI.RST}" if self.auto_instructions else f"{UI.GRAY}Disabled{UI.RST}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Project Guidelines{UI.RST}  : {instr_desc}")
+        hook_entries, hook_files = ExternalHooksManager.load_hook_configs(".")
+        hook_tag = f"{UI.GREEN}Active ({len(hook_entries)} hooks loaded from {', '.join(hook_files)}){UI.RST}" if hook_entries else (f"{UI.GREEN}Active (Scanning hooks.json){UI.RST}" if self.enable_hooks else f"{UI.GRAY}Disabled{UI.RST}")
+        print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Lifecycle Hooks{UI.RST}     : {hook_tag}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Cloud Model{UI.RST}         : {UI.CLOUD}{self.cloud_model}{UI.RST}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Cloud Auth{UI.RST}          : {auth_status}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Multi-line Input{UI.RST}    : {ml_status}")
@@ -1569,6 +1584,7 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/cuda{r}                 : Show NVIDIA CUDA:9001 resource arbitrator state")
         print(f"{g}│{r}   {c}/repomap [path]{r}       : Generate AST symbol map of codebase classes & functions")
         print(f"{g}│{r}   {c}/instructions [view]{r}   : Inspect or toggle auto-injected GEMINI.md / antigravity.md")
+        print(f"{g}│{r}   {c}/hooks [view|refresh]{r}  : Inspect, reload or toggle lifecycle hooks (hooks.json)")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Scripting & Output Formatting:{r}")
         print(f"{g}│{r}   {c}/json{r}                : Toggle structured JSON output mode")

@@ -31,6 +31,7 @@ from .coordinator import CudaCoordinator
 from .subagent import SubagentManager, SubagentTask
 from .repomap import RepoMap
 from .instructions import ProjectInstructions
+from .hooks_loader import ExternalHooksManager
 from .session import MultiGpuHybridSession
 from .cli import read_input_prompt, interactive_loop, main
 
@@ -43,6 +44,7 @@ __all__ = [
     "SubagentTask",
     "RepoMap",
     "ProjectInstructions",
+    "ExternalHooksManager",
     "UI",
     "main",
     "read_input_prompt",

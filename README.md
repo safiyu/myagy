@@ -19,6 +19,8 @@ An asynchronous, dual-accelerator pairing framework and terminal copilot built o
   * Auto-discovers and caches classes, methods, and functions across the repository in <1.5ms, automatically embedding symbol structure into the model's system prompt.
 * **Automatic Project Instructions & Rules Injection (`instructions.py`)**:
   * Scans repository root for `GEMINI.md`, `antigravity.md`, `AGENTS.md` (or `.agents/` / `.gemini/` rules) and feeds project context into system memory on startup (<0.1ms mtime cached).
+* **Lifecycle Hooks Engine (`hooks_loader.py`)**:
+  * Discovers `.agents/hooks.json` and `~/.gemini/config/hooks.json`, executing `PreToolUse` security gates, parameter overwrites, and `PostToolUse` linters.
 * **Universal MCP Server Support**:
   * Discovers Antigravity native, VS Code-compatible, and local Kontexta MCP tools.
 * **Google Cloud Gemini Fallback**:
@@ -37,6 +39,7 @@ Projects/myagy/
 ├── compactor.py          # Slot metrics & continuous rolling hippocampus curation
 ├── repomap.py            # AST symbol mapping with fast mtime caching
 ├── instructions.py       # GEMINI.md / antigravity.md context discovery & injection
+├── hooks_loader.py       # Lifecycle hooks loader (hooks.json Pre/Post tool gates)
 ├── laya.py               # Laya System 1 ModernBERT decision protocol
 ├── llamashift.py         # Port telemetry, model catalog & hot-swapping
 ├── mcp_loader.py         # Native, VS Code, and Kontexta MCP discovery
@@ -100,6 +103,7 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/repomap on\|off` | Toggle automatic codebase outline injection into model memory |
 | `/repomap refresh` | Force an immediate cache invalidation and re-index |
 | `/instructions [view]` | Inspect or toggle auto-injected GEMINI.md / antigravity.md context |
+| `/hooks [view\|refresh]` | Inspect, reload, or toggle lifecycle hooks (`hooks.json`) |
 | `/compact` | Condense older conversation turns into dense Working Memory |
 | `/curation on\|off` | Toggle continuous rolling background hippocampus on RTX 4060 |
 | `/context` or `/ctx` | Display live context window telemetry and headroom progress bar |

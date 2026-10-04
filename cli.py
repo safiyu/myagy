@@ -553,6 +553,41 @@ async def interactive_loop(session: MultiGpuHybridSession):
                     else:
                         print(f"{UI.GRAY}Usage: /instructions [on|off|refresh|view]{UI.RST}")
 
+                elif cmd in ("/hooks", "/hook"):
+                    from .hooks_loader import ExternalHooksManager
+                    arg_low = arg.lower().strip()
+                    if arg_low in ("on", "enable", "true"):
+                        session.enable_hooks = True
+                        session._active_local_agent = None
+                        print(UI.ok("External lifecycle hooks (hooks.json) ENABLED."))
+                    elif arg_low in ("off", "disable", "false"):
+                        session.enable_hooks = False
+                        session._active_local_agent = None
+                        print(UI.ok("External lifecycle hooks (hooks.json) DISABLED."))
+                    elif arg_low in ("refresh", "reload"):
+                        entries, sources = ExternalHooksManager.load_hook_configs(".", force_refresh=True)
+                        session._active_local_agent = None
+                        print(UI.ok(f"Lifecycle hooks reloaded. Found {len(entries)} active hook(s) from {len(sources)} file(s)."))
+                    elif arg_low in ("view", "list", "status") or not arg:
+                        entries, sources = ExternalHooksManager.load_hook_configs(".", force_refresh=False)
+                        st = f"{UI.GREEN}ENABLED{UI.RST}" if session.enable_hooks else f"{UI.GRAY}DISABLED{UI.RST}"
+                        print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}EXTERNAL LIFECYCLE HOOKS ({st}){UI.RST}{UI.DARK_GRAY} ────────────────────────╮{UI.RST}")
+                        if sources:
+                            print(f"{UI.DARK_GRAY}│{UI.RST}  Source Files:")
+                            for sf in sources:
+                                print(f"{UI.DARK_GRAY}│{UI.RST}    • {UI.CYAN}{sf}{UI.RST}")
+                            print(f"{UI.DARK_GRAY}│{UI.RST}")
+                            print(f"{UI.DARK_GRAY}│{UI.RST}  Active Hooks ({len(entries)}):")
+                            for entry in entries:
+                                events = [ev for ev in ["PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop"] if entry["spec"].get(ev)]
+                                print(f"{UI.DARK_GRAY}│{UI.RST}    • {UI.WHITE}{entry['name']:20s}{UI.RST} ➔ Events: {UI.AMBER}{', '.join(events)}{UI.RST}")
+                        else:
+                            print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.GRAY}No hooks.json discovered in .agents/hooks.json or ~/.gemini/config/hooks.json{UI.RST}")
+                        print(f"{UI.DARK_GRAY}╰─────────────────────────────────────────────────────────────╯{UI.RST}")
+                        print(f"{UI.GRAY}Commands: /hooks on | /hooks off | /hooks refresh | /hooks view{UI.RST}\n")
+                    else:
+                        print(f"{UI.GRAY}Usage: /hooks [on|off|refresh|view]{UI.RST}")
+
                 elif cmd in ("/steps", "/maxsteps", "/max-steps"):
                     arg_low = arg.lower()
                     if arg_low in ("off", "disable", "unlimited", "none", "0"):
