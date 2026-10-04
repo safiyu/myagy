@@ -420,16 +420,17 @@ class MultiGpuHybridSession:
 
     def build_system_context(self, target: str) -> str:
         base_inst = (
-            "You are Antigravity, an expert software engineering assistant.\n"
+            "You are Antigravity, an expert software engineering autonomous agent.\n"
             "You have full access to codebase inspection, editing, and execution tools.\n\n"
-            "OPERATIONAL GUIDELINES:\n"
-            "1. ACTION OVER MONOLOGUE: When you need to inspect or edit files (e.g. view_file, grep_search, edit_file, run_command), "
-            "CALL THE TOOLS IMMEDIATELY. Never produce conversational text merely stating 'Let me read...' or 'Now I will inspect...' "
-            "— invoke the actual tool calls directly.\n"
-            "2. NO REDUNDANT CALLS: Do not re-run the same command or re-read the same file if you already have the result.\n"
-            "3. ERROR HANDLING: If a tool fails or reports an error, analyze the error and explain it rather than repeating in a loop.\n"
-            "4. COMPLETION: Once you have executed the required tools and completed the task, STOP calling tools and provide your "
-            "final response directly to the user."
+            "CRITICAL OPERATIONAL RULES:\n"
+            "1. NO MONOLOGUE / NO PREAMBLE: When you need to read or search files, execute commands, or inspect code, "
+            "DO NOT write conversational sentences such as 'Let me check...', 'Now I will inspect...', 'Let me confirm...', "
+            "or 'I will now run...'. Emit the tool calls IMMEDIATELY. Explanations before tool calls are strictly forbidden.\n"
+            "2. DIRECT ACTION: Analyze findings silently and proceed directly to the necessary action. Every turn must make tangible "
+            "progress with real tool calls or a concise final resolution.\n"
+            "3. NO REDUNDANT CALLS: Do not re-run the same command or re-read the same file if you already have the result.\n"
+            "4. ERROR HANDLING: If a tool fails or reports an error, inspect the output and correct your approach in the next tool call.\n"
+            "5. COMPLETION: Once your task is finished, output a crisp, formatted markdown summary of your findings or changes, and STOP calling tools."
         )
 
         # Automatic project instructions injection (GEMINI.md, antigravity.md, etc.)
@@ -620,17 +621,15 @@ class MultiGpuHybridSession:
         return self._active_local_agent
 
     async def _consume_token_stream(self, token_stream, status_msg: str = "Thinking & generating response...") -> tuple[str, int, Optional[float]]:
-        """Consumes an async token stream with an animated spinner while waiting for first token,
-        then renders formatted Markdown with tables, code, and colors in real-time."""
+        """Consumes an async token stream with low-latency streaming and formatted rendering."""
         full_response: List[str] = []
         token_count = 0
         t_first = None
         status = console.status(f"[bold cyan]{status_msg}[/bold cyan]", spinner="dots") if (RICH_AVAILABLE and not self.json_output) else None
         if status:
             status.start()
-        live = Live(console=console, refresh_per_second=10, vertical_overflow="visible") if (RICH_AVAILABLE and not self.json_output) else None
-        live_active = False
 
+        # Low-latency streaming direct to stdout with smooth word rendering
         async for token in token_stream:
             if t_first is None:
                 t_first = time.perf_counter()
@@ -639,22 +638,16 @@ class MultiGpuHybridSession:
                     status = None
             full_response.append(token)
             token_count += 1
-            if live:
-                if not live_active:
-                    live.start()
-                    live_active = True
-                live.update(Markdown("".join(full_response)))
-            elif not self.json_output:
+            if not self.json_output:
                 sys.stdout.write(token)
                 sys.stdout.flush()
 
         if status:
             status.stop()
-        if live and live_active:
-            live.update(Markdown("".join(full_response)))
-            live.stop()
-        elif not self.json_output:
-            print("\n")
+
+        if not self.json_output:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
         return "".join(full_response).strip(), token_count, t_first
 
@@ -709,12 +702,10 @@ class MultiGpuHybridSession:
         stderr_task = asyncio.create_task(drain_stderr())
         collected_text = []
         cleared_spinner = False
-        live = Live(console=console, refresh_per_second=10, vertical_overflow="visible") if (RICH_AVAILABLE and not self.json_output) else None
-        live_active = False
         t_turn_start = time.perf_counter()
 
         async def read_stream():
-            nonlocal cleared_spinner, live_active, status
+            nonlocal cleared_spinner, status
             while True:
                 elapsed = time.perf_counter() - t_turn_start
                 if elapsed > MAX_TOTAL_SECS:
@@ -752,10 +743,8 @@ class MultiGpuHybridSession:
                             or ""
                         )
                         summary_str = f" ➔ {summary[:55]}" if summary else ""
-                        tool_msg = f"{UI.DARK_GRAY}⚡ [Cloud Tool: {tool_name}]{summary_str}{UI.RST}"
-                        if live and live_active:
-                            live.console.print(tool_msg)
-                        elif status:
+                        tool_msg = f"{UI.AMBER_BOLD}[⚡ Cloud Tool: {tool_name}]{UI.RST}{UI.WHITE}{summary_str}{UI.RST}"
+                        if status:
                             status.update(f"[bold yellow]⚙ Cloud Tool: {tool_name}[/bold yellow] [dim]{summary_str}[/dim]")
                         else:
                             sys.stdout.write(f"\r\033[K{tool_msg}\n")
@@ -772,12 +761,7 @@ class MultiGpuHybridSession:
                                 sys.stdout.flush()
                                 cleared_spinner = True
                             collected_text.append(delta)
-                            if live:
-                                if not live_active:
-                                    live.start()
-                                    live_active = True
-                                live.update(Markdown("".join(collected_text)))
-                            elif not self.json_output:
+                            if not self.json_output:
                                 sys.stdout.write(delta)
                                 sys.stdout.flush()
 
@@ -796,8 +780,6 @@ class MultiGpuHybridSession:
                 pass
             if status:
                 status.stop()
-            if live and live_active:
-                live.stop()
             if not cleared_spinner and not self.json_output:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
@@ -807,10 +789,7 @@ class MultiGpuHybridSession:
 
         if status:
             status.stop()
-        if live and live_active:
-            live.update(Markdown("".join(collected_text)))
-            live.stop()
-        elif not cleared_spinner and not self.json_output:
+        if not cleared_spinner and not self.json_output:
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
         elif not self.json_output:
