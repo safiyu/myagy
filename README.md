@@ -45,6 +45,27 @@ Projects/myagy/
 
 ---
 
+## 🛠️ Installation & Setup
+
+### 1. Prerequisites
+Ensure Python 3.10+ and the required packages are installed:
+```bash
+pip install -r requirements.txt  # Or install google-antigravity, rich, httpx, etc.
+```
+
+### 2. Configure Bash Alias
+To launch `myagy` from anywhere in your terminal, add the alias to your `~/.bashrc`:
+
+```bash
+# Append alias to ~/.bashrc
+echo "alias myagy='python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-permissions'" >> ~/.bashrc
+
+# Reload your shell environment
+source ~/.bashrc
+```
+
+---
+
 ## 🚀 Quickstart & Usage
 
 ### Running the Agent
