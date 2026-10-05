@@ -10,6 +10,8 @@ KONTEXTA_DATA_DIR = os.path.expanduser("~/.local/share/kontexta")
 DEFAULT_MODEL_DIR = "/home/safiyu/models"
 OAUTH_TOKEN_PATH = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
 PLANS_DIR = os.path.expanduser("~/.myagy/plans")
+PREFS_PATH = os.path.expanduser("~/.myagy/config.json")
+HISTORY_PATH = os.path.expanduser("~/.myagy/prompt_history")
 
 # Default Service Endpoints & Ports
 PORT_ROCM = 9000

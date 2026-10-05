@@ -36,7 +36,8 @@ from ..config import (
     DEFAULT_CLOUD_MODEL,
     DEFAULT_LAYA_ENDPOINT,
 )
-from ..terminal.ui import UI, RICH_AVAILABLE, console
+from ..terminal.ui import UI, RICH_AVAILABLE, console, StreamRenderer
+from ..terminal.esc_listener import prompt_input
 from .llamashift import (
     detect_port_model,
     trigger_llamashift_switch,
@@ -47,6 +48,8 @@ from ..context.mcp_loader import load_mcp_servers, check_oauth_available
 from .laya import LayaDecisionEngine
 from ..agents.compactor import ContextCurator
 from .coordinator import CudaCoordinator
+from .checkpoints import Checkpoints
+from .prefs import PREF_DEFAULTS, load_prefs, save_prefs
 from ..agents.subagent import SubagentManager, SubagentTask
 from ..context.repomap import RepoMap
 from ..context.instructions import ProjectInstructions
@@ -81,6 +84,7 @@ class MultiGpuHybridSession:
         self.auto_repomap: bool = True
         self.auto_instructions: bool = True
         self.enable_hooks: bool = True
+        self.render_markdown: bool = True
 
         # Load MCP servers once at startup
         self._mcp_servers: List[McpStdioServer | McpStreamableHttpServer] = []
@@ -122,6 +126,13 @@ class MultiGpuHybridSession:
         self.max_tool_steps_per_turn: int = 0
         self._current_turn_tool_count: int = 0
         self._recent_tool_calls: List[tuple] = []
+        self._turn_executed_tools: List[Dict[str, Any]] = []
+        self._last_tool_call: Dict[str, Any] = {}
+        # Per-target usage ledger for /stats
+        self.stats: Dict[str, Dict[str, float]] = {}
+        # Working-tree checkpoints per turn for /diff and /undo
+        self.checkpoints: List[Dict[str, Any]] = []
+        self._repo_root: Optional[str] = None
 
         # NVIDIA RTX 4060 (:9001) Background Context Curator Cache
         self._cached_curated_memory: Optional[Dict[str, Any]] = None
@@ -223,7 +234,7 @@ class MultiGpuHybridSession:
                 print(f"{UI.AMBER_BOLD}│{UI.RST}   {line}")
         print(f"{UI.AMBER_BOLD}╰───────────────────────────────────────────────────────────────────╯{UI.RST}")
         try:
-            choice = input(f"{UI.AMBER_BOLD}Authorize execution? [y/N]: {UI.RST}").strip().lower()
+            choice = prompt_input(f"{UI.AMBER_BOLD}Authorize execution? [y/N]: {UI.RST}").strip().lower()
             allowed = choice in ("y", "yes")
             if allowed:
                 print(f"{UI.GREEN_BOLD}[✓] Execution approved.{UI.RST}")
@@ -365,6 +376,8 @@ class MultiGpuHybridSession:
                 return types.HookResult(allow=False, message=msg)
 
             self._recent_tool_calls.append(sig)
+            self._turn_executed_tools.append({"name": c_name, "args": c_args})
+            self._last_tool_call = {"name": c_name, "args": c_args}
 
             # Max steps budget check
             if self.max_tool_steps_per_turn > 0 and self._current_turn_tool_count > self.max_tool_steps_per_turn:
@@ -421,7 +434,7 @@ class MultiGpuHybridSession:
 
         return all_hooks
 
-    def build_system_context(self, target: str) -> str:
+    def build_system_context(self, target: str, include_history: bool = True) -> str:
         base_inst = (
             "You are Antigravity, an expert software engineering autonomous agent.\n"
             "You have full access to codebase inspection, editing, and execution tools.\n\n"
@@ -458,7 +471,7 @@ class MultiGpuHybridSession:
                     f"[End of Codebase Symbol Map]\n"
                 )
 
-        if not self.history:
+        if not self.history or not include_history:
             return base_inst
 
         # Sliding window: keep the last max_recent_turns verbatim, summarize earlier turns
@@ -543,6 +556,7 @@ class MultiGpuHybridSession:
                     })
                 except Exception:
                     pass
+        sessions.sort(key=lambda x: x["saved_at"] if x["saved_at"] != "Unknown" else "", reverse=True)
         return sessions
 
     def export_markdown(self, filepath: Optional[str] = None) -> str:
@@ -626,49 +640,50 @@ class MultiGpuHybridSession:
         return self._active_local_agent
 
     async def _consume_token_stream(self, token_stream, status_msg: str = "Thinking & generating response...") -> tuple[str, int, Optional[float]]:
-        """Consumes an async token stream with low-latency streaming and formatted rendering."""
+        """Consumes an async token stream, rendering Markdown live when rich is available."""
         full_response: List[str] = []
         token_count = 0
         t_first = None
         status = console.status(f"[bold cyan]{status_msg}[/bold cyan]", spinner="dots") if (RICH_AVAILABLE and not self.json_output) else None
         if status:
             status.start()
+        renderer = StreamRenderer(markdown=self.render_markdown, enabled=not self.json_output)
 
-        # Low-latency streaming direct to stdout with smooth word rendering
-        async for token in token_stream:
-            if t_first is None:
-                t_first = time.perf_counter()
-                if status:
-                    status.stop()
-                    status = None
-            full_response.append(token)
-            token_count += 1
-            if not self.json_output:
-                sys.stdout.write(token)
-                sys.stdout.flush()
-
-        if status:
-            status.stop()
-
-        if not self.json_output:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+        try:
+            async for token in token_stream:
+                if t_first is None:
+                    t_first = time.perf_counter()
+                    if status:
+                        status.stop()
+                        status = None
+                full_response.append(token)
+                token_count += 1
+                renderer.feed(token)
+        finally:
+            if status:
+                status.stop()
+            renderer.stop()
 
         return "".join(full_response).strip(), token_count, t_first
 
-    async def chat_cloud_oauth(self, prompt: str) -> str:
+    async def chat_cloud_oauth(self, prompt: str, with_project_context: bool = True) -> str:
         """Executes a cloud turn using the existing Google OAuth session via agy CLI."""
         context_prefix = ""
         if self.history:
-            recent = self.history[-2:]
             lines = []
+            recent = self.history[-self.max_recent_turns:]
+            # Keep the distilled working memory if it fell outside the recent window
+            first = self.history[0]
+            if first not in recent and "[SYSTEM: Context compacted" in first.get("content", ""):
+                lines.append(f"[WORKING MEMORY]: {first['content'].strip()[:3000]}")
             for t in recent:
                 role = t.get("role", "").upper()
                 content = t.get("content", "").strip()
-                lines.append(f"[{role}]: {content[:500]}")
+                lines.append(f"[{role}]: {content[:1500]}")
             context_prefix = "\n".join(lines) + "\n\n"
 
-        full_prompt = f"{context_prefix}[USER]: {prompt}" if context_prefix else prompt
+        project_ctx = self._cloud_project_context() if with_project_context else ""
+        full_prompt = f"{project_ctx}{context_prefix}[USER]: {prompt}" if (context_prefix or project_ctx) else prompt
 
         IDLE_TIMEOUT_SECS = 300
         MAX_TOTAL_SECS = 7200
@@ -707,6 +722,7 @@ class MultiGpuHybridSession:
         stderr_task = asyncio.create_task(drain_stderr())
         collected_text = []
         cleared_spinner = False
+        renderer = StreamRenderer(markdown=self.render_markdown, enabled=not self.json_output)
         t_turn_start = time.perf_counter()
 
         async def read_stream():
@@ -766,9 +782,7 @@ class MultiGpuHybridSession:
                                 sys.stdout.flush()
                                 cleared_spinner = True
                             collected_text.append(delta)
-                            if not self.json_output:
-                                sys.stdout.write(delta)
-                                sys.stdout.flush()
+                            renderer.feed(delta)
 
                 elif event == "result":
                     pass
@@ -777,6 +791,18 @@ class MultiGpuHybridSession:
             await read_stream()
             await stderr_task
             await proc.wait()
+        except asyncio.CancelledError:
+            # ESC/Ctrl+C: don't leave the agy subprocess running in the background
+            try:
+                proc.kill()
+                stderr_task.cancel()
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except BaseException:
+                pass
+            if status:
+                status.stop()
+            renderer.stop()
+            raise
         except asyncio.TimeoutError as te:
             try:
                 proc.kill()
@@ -785,6 +811,7 @@ class MultiGpuHybridSession:
                 pass
             if status:
                 status.stop()
+            renderer.stop()
             if not cleared_spinner and not self.json_output:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
@@ -794,11 +821,9 @@ class MultiGpuHybridSession:
 
         if status:
             status.stop()
+        renderer.stop()
         if not cleared_spinner and not self.json_output:
             sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
-        elif not self.json_output:
-            sys.stdout.write("\n")
             sys.stdout.flush()
 
         combined_out = "".join(collected_text).strip()
@@ -812,7 +837,7 @@ class MultiGpuHybridSession:
 
         return combined_out
 
-    async def chat(self, prompt: str, force_target: Optional[str] = None):
+    async def _chat_impl(self, prompt: str, force_target: Optional[str] = None) -> str:
         target = self.resolve_target_alias(force_target or self.active_target)
 
         # Dynamic check of ports before routing
@@ -822,6 +847,7 @@ class MultiGpuHybridSession:
         self._current_turn_tool_count = 0
         self._recent_tool_calls.clear()
         executed_tools: List[Dict[str, Any]] = []
+        self._turn_executed_tools = executed_tools
         token_count: int = 0
         tps: Optional[float] = None
         ttft_ms: Optional[float] = None
@@ -844,6 +870,8 @@ class MultiGpuHybridSession:
             else:
                 print(msg, file=sys.stderr)
             target = routed_id
+
+        initial_target = target
 
         if target == "cloud":
             auth_info = "OAuth token" if self.has_oauth else "API key"
@@ -937,25 +965,11 @@ class MultiGpuHybridSession:
 
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 current_response = None
-                tool_task = None
                 try:
                     t_start = time.perf_counter()
                     t_first = None
                     token_count = 0
                     current_response = await agent.chat(prompt)
-
-                    async def monitor_tools():
-                        try:
-                            async for call in current_response.tool_calls:
-                                c_name = getattr(call, "name", str(call))
-                                c_args = getattr(call, "args", {})
-                                executed_tools.append({"name": c_name, "args": c_args})
-                                if not self.json_output:
-                                    print(f"\n{UI.AMBER_BOLD}[⚙ Tool Executing]{UI.RST} {UI.WHITE}{c_name}{UI.RST}{UI.GRAY}({c_args}){UI.RST}", flush=True)
-                                else:
-                                    print(f"[Tool Executing] {c_name}({c_args})", file=sys.stderr, flush=True)
-                        except BaseException:
-                            pass
 
                     response_text, token_count, t_first = await self._consume_token_stream(current_response)
                     t_end = time.perf_counter()
@@ -971,8 +985,6 @@ class MultiGpuHybridSession:
                     break
 
                 except Exception as turn_err:
-                    if tool_task:
-                        tool_task.cancel()
                     if _is_exceed_context_error(turn_err):
                         compact_msg = (
                             f"\n{UI.AMBER_BOLD}[⚠ Context size exceeded!]{UI.RST} {UI.WHITE}Auto-compacting conversation history...{UI.RST}"
@@ -1061,13 +1073,6 @@ class MultiGpuHybridSession:
                         break
                     else:
                         raise
-                finally:
-                    if tool_task and not tool_task.done():
-                        tool_task.cancel()
-                        try:
-                            await asyncio.shield(asyncio.wait_for(asyncio.sleep(0), timeout=0.1))
-                        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-                            pass
 
         self.history.append({"role": "user", "target": target, "content": prompt})
         if response_text:
@@ -1087,6 +1092,9 @@ class MultiGpuHybridSession:
         else:
             self.trigger_background_synthesis()
 
+        approx_tokens = token_count if token_count else len(response_text.split())
+        self._record_stats(initial_target, target, approx_tokens, tps, ttft_ms, total_dur)
+
         if self.json_output:
             json_payload = {
                 "status": "success",
@@ -1104,6 +1112,178 @@ class MultiGpuHybridSession:
                 },
             }
             print(json.dumps(json_payload, indent=2, ensure_ascii=False))
+        return response_text
+
+    MAX_STOP_RETRIES = 2
+
+    async def chat(self, prompt: str, force_target: Optional[str] = None) -> str:
+        """One user turn: PreTurn hooks, model run, checkpoint, PostTurn/Stop hooks."""
+        if self.enable_hooks:
+            verdict = await asyncio.to_thread(ExternalHooksManager.run_turn_event, self, "PreTurn", {"prompt": prompt})
+            if verdict.get("deny"):
+                msg = f"Turn blocked by PreTurn hook: {verdict.get('reason') or 'denied'}"
+                print(UI.warn(msg) if not self.json_output else msg, file=sys.stderr if self.json_output else sys.stdout)
+                return ""
+            prompt = verdict.get("prompt") or prompt
+
+        before = await self._checkpoint_before()
+        response = ""
+        try:
+            response = await self._chat_impl(prompt, force_target) or ""
+            if self.enable_hooks:
+                payload = {"prompt": prompt, "response": response}
+                await asyncio.to_thread(ExternalHooksManager.run_turn_event, self, "PostTurn", payload)
+                for _ in range(self.MAX_STOP_RETRIES):
+                    stop = await asyncio.to_thread(
+                        ExternalHooksManager.run_turn_event, self, "Stop", {"prompt": prompt, "response": response},
+                    )
+                    if not stop.get("block"):
+                        break
+                    note = f"Stop hook requires more work: {stop['reason']}"
+                    print(UI.warn(note) if not self.json_output else note, file=sys.stderr if self.json_output else sys.stdout)
+                    response = await self._chat_impl(stop["reason"], force_target) or response
+        except Exception:
+            st = self.stats.setdefault(self.resolve_target_alias(force_target or self.active_target), {})
+            st["errors"] = st.get("errors", 0) + 1
+            raise
+        finally:
+            self._checkpoint_after(before, prompt)
+        return response
+
+    # ── Checkpoints (/diff, /undo) ────────────────────────────────────
+
+    async def _checkpoint_before(self) -> Optional[str]:
+        if self._repo_root is None:
+            self._repo_root = await asyncio.to_thread(Checkpoints.repo_root) or ""
+        if not self._repo_root:
+            return None
+        return await asyncio.to_thread(Checkpoints.snapshot, self._repo_root)
+
+    def _checkpoint_after(self, before: Optional[str], prompt: str):
+        if not before or not self._repo_root:
+            return
+        after = Checkpoints.snapshot(self._repo_root)
+        if after and after != before:
+            self.checkpoints.append({"prompt": prompt.strip().splitlines()[0][:80] if prompt.strip() else "", "before": before, "after": after, "time": time.time()})
+            del self.checkpoints[:-Checkpoints.MAX_TURNS]
+
+    def turn_diff(self, nth: int = 1, stat: bool = False) -> Optional[str]:
+        """Diff of the nth most recent turn that changed files (1 = latest); None if unavailable."""
+        if not self.checkpoints or nth < 1 or nth > len(self.checkpoints):
+            return None
+        cp = self.checkpoints[-nth]
+        return Checkpoints.diff(self._repo_root, cp["before"], cp["after"], stat=stat)
+
+    def undo_plan(self) -> Optional[Dict[str, Any]]:
+        """Files that /undo would revert for the latest changed turn, or None."""
+        if not self.checkpoints or not self._repo_root:
+            return None
+        cp = self.checkpoints[-1]
+        current = Checkpoints.snapshot(self._repo_root)
+        if not current:
+            return None
+        return {"checkpoint": cp, "files": Checkpoints.changed(self._repo_root, cp["before"], current), "current": current}
+
+    def apply_undo(self, plan: Dict[str, Any]) -> List[str]:
+        """Reverts the working tree to just before the planned turn and tells the model."""
+        cp = plan["checkpoint"]
+        touched = Checkpoints.restore(self._repo_root, cp["before"], plan["current"])
+        self.checkpoints.remove(cp)
+        self.history.extend([
+            {"role": "user", "target": self.active_target, "content": f"[SYSTEM: The user reverted all file changes from the turn \"{cp['prompt']}\" with /undo. Files restored: {', '.join(touched) or 'none'}.]"},
+            {"role": "assistant", "target": self.active_target, "content": "[SYSTEM: Acknowledged. Those file changes no longer exist.]"},
+        ])
+        self._active_local_agent = None
+        return touched
+
+    # ── Usage ledger (/stats) ─────────────────────────────────────────
+
+    def _record_stats(self, routed: str, final: str, tokens: int, tps: Optional[float], ttft_ms: Optional[float], dur: Optional[float]):
+        st = self.stats.setdefault(final, {})
+        st["turns"] = st.get("turns", 0) + 1
+        st["tokens"] = st.get("tokens", 0) + tokens
+        st["seconds"] = st.get("seconds", 0.0) + (dur or 0.0)
+        if tps:
+            st["tps_sum"] = st.get("tps_sum", 0.0) + tps
+            st["tps_n"] = st.get("tps_n", 0) + 1
+        if ttft_ms:
+            st["ttft_sum"] = st.get("ttft_sum", 0.0) + ttft_ms
+            st["ttft_n"] = st.get("ttft_n", 0) + 1
+        if routed != final:
+            origin = self.stats.setdefault(routed, {})
+            origin["escalations"] = origin.get("escalations", 0) + 1
+
+    def print_stats(self):
+        if not self.stats:
+            print(f"\n{UI.GRAY}(no turns recorded yet this session){UI.RST}\n")
+            return
+        rows = []
+        for tgt, st in sorted(self.stats.items()):
+            tps = f"{st['tps_sum'] / st['tps_n']:.1f}" if st.get("tps_n") else "-"
+            ttft = f"{st['ttft_sum'] / st['ttft_n']:.0f}ms" if st.get("ttft_n") else "-"
+            label = self.endpoints[tgt]["name"] if tgt in self.endpoints else ("Cloud" if tgt == "cloud" else tgt)
+            rows.append((label, int(st.get("turns", 0)), int(st.get("tokens", 0)), tps, ttft, f"{st.get('seconds', 0.0):.1f}s", int(st.get("escalations", 0)), int(st.get("errors", 0))))
+        headers = ("Target", "Turns", "Tokens", "Avg tok/s", "Avg TTFT", "Time", "Escalated away", "Errors")
+        if RICH_AVAILABLE and not self.json_output:
+            table = Table(title=Text.from_ansi(f"{UI.WHITE}SESSION USAGE LEDGER{UI.RST}"), box=box.ROUNDED, header_style="bold cyan", border_style="bright_black")
+            for i, h in enumerate(headers):
+                table.add_column(h, justify="left" if i == 0 else "right")
+            for r in rows:
+                table.add_row(*[str(c) for c in r])
+            console.print()
+            console.print(table)
+            console.print(f"[dim]Cloud token counts are word-count estimates.[/dim]\n")
+        else:
+            print()
+            for r in rows:
+                print("  " + " | ".join(f"{h}: {c}" for h, c in zip(headers, r)))
+            print()
+
+    # ── Preferences ───────────────────────────────────────────────────
+
+    def preferences(self) -> Dict[str, Any]:
+        out = {k: getattr(self, k, None) for k in PREF_DEFAULTS}
+        return {k: v for k, v in out.items() if v is not None}
+
+    def apply_preferences(self, prefs: Dict[str, Any]):
+        for key, val in prefs.items():
+            if key not in PREF_DEFAULTS:
+                continue
+            if key == "active_target":
+                self.active_target = self.resolve_target_alias(val)
+            elif key == "dangerously_skip_permissions":
+                self._dangerously_skip_permissions = val
+            else:
+                setattr(self, key, val)
+
+    def save_preferences(self) -> bool:
+        return save_prefs(self.preferences())
+
+    def _cloud_project_context(self) -> str:
+        """Project rules and symbol map for cloud turns (agy only sees the prompt text we pass)."""
+        parts = []
+        if self.auto_instructions:
+            text, _ = ProjectInstructions.load_instructions(".")
+            if text:
+                parts.append(f"[Project Guidelines]\n{text[:6000]}\n[End of Project Guidelines]")
+        if self.auto_repomap:
+            rmap = RepoMap.get_cached_map(".")
+            if rmap:
+                parts.append(f"[Codebase Symbol Map]\n{rmap[:6000]}\n[End of Symbol Map]")
+        return "\n\n".join(parts) + "\n\n" if parts else ""
+
+    async def chat_turn(self, prompt: str, target: Optional[str] = None):
+        """Runs one chat turn on an explicit target (used by workflows)."""
+        await self.chat(prompt, force_target=target)
+
+    async def reset_local_agent(self):
+        """Closes and drops the cached local agent so the next turn starts fresh."""
+        agent, self._active_local_agent = self._active_local_agent, None
+        if agent is not None:
+            try:
+                await agent.__aexit__(None, None, None)
+            except Exception:
+                pass
 
     async def close(self):
         if self.history:
@@ -1529,7 +1709,7 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/model <# or id>{r}     : Switch model (auto hot-swaps inactive via llama-shift)")
         print(f"{g}│{r}   {c}/auto{r}               : Laya System 1 auto-routing (routes in ~33ms)")
         print(f"{g}│{r}   {c}/9000{r} or {c}/rocm{r}       : AMD ROCm GPU (Port 9000)")
-        print(f"{g}│{r}   {c}/9001{r} or {c}/cuda{r}       : NVIDIA CUDA RTX 5090 (Port 9001)")
+        print(f"{g}│{r}   {c}/9001{r} or {c}/cuda{r}       : NVIDIA CUDA RTX 4060 (Port 9001)")
         print(f"{g}│{r}   {c}/cloud{r}              : Google Gemini (uses your OAuth token)")
         print(f"{g}│{r}   {c}/mode <target>{r}      : Switch target by alias, model ID, or number")
         print(f"{g}│{r}")
@@ -1577,6 +1757,13 @@ class MultiGpuHybridSession:
         print(f"{g}│{r} {UI.BOLD}Web Search & Live Documentation:{r}")
         print(f"{g}│{r}   {c}/search <query>{r}       : Live web search (DuckDuckGo + GitHub) with clean snippets")
         print(f"{g}│{r}   {c}/fetch <url>{r}          : Fetch webpage & convert HTML to clean markdown text")
+        print(f"{g}│{r}")
+        print(f"{g}│{r} {UI.BOLD}Review, Undo & Usage:{r}")
+        print(f"{g}│{r}   {c}/diff [n]{r}            : Show file changes from the nth latest turn (default 1)")
+        print(f"{g}│{r}   {c}/undo{r}                : Revert the latest turn's file changes (asks first)")
+        print(f"{g}│{r}   {c}/stats [reset]{r}       : Per-target tokens, tok/s, TTFT, escalations, errors")
+        print(f"{g}│{r}   {c}/markdown [on|off]{r}   : Toggle rendered Markdown for responses")
+        print(f"{g}│{r}   {c}/prefs [reset]{r}       : Show or reset saved preferences (~/.myagy/config.json)")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Scripting & Output Formatting:{r}")
         print(f"{g}│{r}   {c}/json{r}                : Toggle structured JSON output mode")

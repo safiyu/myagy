@@ -39,3 +39,6 @@ env/
 
 # Temporary & session scratch files
 scratch/
+
+# Test caches
+.pytest_cache/

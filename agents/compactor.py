@@ -40,7 +40,7 @@ class ContextCurator:
                 pass
 
         if n_tokens is None or n_tokens == 0:
-            sys_len = len(session.build_system_context(tgt))
+            sys_len = len(session.build_system_context(tgt, include_history=False))
             hist_len = sum(len(h.get("content", "")) for h in session.history)
             n_tokens = int((sys_len + hist_len) / 3.6)
             if tgt in ("9000", "9001"):
@@ -209,10 +209,8 @@ class ContextCurator:
     @classmethod
     async def async_synthesize_cuda(cls, session: Any):
         """Background coroutine that pre-computes Working Memory synthesis on CUDA:9001 only when idle."""
-        if not CudaCoordinator.can_compact():
+        if not CudaCoordinator.start_compaction(asyncio.current_task()):
             return
-
-        CudaCoordinator.start_compaction(session._synthesis_task)
         try:
             if len(session.history) <= session.max_recent_turns:
                 return
@@ -246,9 +244,8 @@ class ContextCurator:
         if session._synthesis_task and not session._synthesis_task.done():
             return
         if len(session.history) > session.max_recent_turns:
-            task = asyncio.create_task(cls.async_synthesize_cuda(session))
-            session._synthesis_task = task
-            CudaCoordinator.start_compaction(task)
+            # The coroutine takes the coordinator slot itself once it starts
+            session._synthesis_task = asyncio.create_task(cls.async_synthesize_cuda(session))
 
     @classmethod
     def summarize_history_sync(cls, session: Any, turns: List[Dict[str, str]]) -> str:

@@ -25,6 +25,12 @@ An asynchronous, dual-accelerator pairing framework and terminal copilot built o
   * Hybrid pipeline: Cloud Gemini (architecture & spec) ➔ User Approval ➔ AMD ROCm (implementation & self-healing test run) ➔ Local & Cloud Dual Review ➔ User Approval ➔ Git Commit.
 * **Live Web Search & Documentation Scraper (`web_search.py` / `/search`, `/fetch`)**:
   * Zero external pip dependencies: multi-source live web search (DuckDuckGo + GitHub) and HTML-to-clean-Markdown webpage extractor.
+* **Per-Turn Checkpoints (`/diff`, `/undo`)**:
+  * Every turn that changes files is snapshotted as git tree objects (real index untouched), so you can review or revert exactly what the agent did, including changes made by shell commands.
+* **Usage Ledger (`/stats`)**: per-target tokens, tok/s, TTFT, time, escalations and errors for the session.
+* **Persistent Preferences (`~/.myagy/config.json`)**: target, permission mode, toggles and thresholds survive restarts and `/reload`. Explicit CLI flags win over saved values.
+* **Markdown Rendering**: responses stream through a live Markdown renderer (toggle with `/markdown`).
+* **Tool-Using Subagents**: `/spawn` runs a real agent on :9001 with the same hooks; unsafe actions are denied (no prompts from the background). Falls back to a plain no-tools completion if the agent can't start.
 * **Universal MCP Server Support**:
   * Discovers Antigravity native, VS Code-compatible, and local Kontexta MCP tools.
 * **Google Cloud Gemini Fallback**:
@@ -44,6 +50,8 @@ Projects/myagy/
 ├── core/                     # Core execution & multi-GPU routing engine
 │   ├── session.py            # MultiGpuHybridSession cross-GPU orchestrator
 │   ├── coordinator.py        # NVIDIA CUDA:9001 resource arbitrator
+│   ├── checkpoints.py        # Git tree snapshots behind /diff and /undo
+│   ├── prefs.py              # Persisted preferences (~/.myagy/config.json)
 │   ├── laya.py               # Laya System 1 ModernBERT decision protocol
 │   └── llamashift.py         # Port telemetry, model catalog & hot-swapping
 │
@@ -64,7 +72,9 @@ Projects/myagy/
 └── terminal/                 # Interactive UI & CLI experience
     ├── cli.py                # Multi-line prompt reader, slash commands & REPL
     ├── ui.py                 # ANSI palette, styling, Rich console integration
-    └── esc_listener.py       # Instant ESC-key interrupt listener
+    └── esc_listener.py       # Instant ESC-key interrupt listener (pausable for prompts)
+
+tests/                        # pytest suite (runs against a stubbed SDK)
 ```
 
 ---
@@ -74,7 +84,13 @@ Projects/myagy/
 ### 1. Prerequisites
 Ensure Python 3.10+ and the required packages are installed:
 ```bash
-pip install -r requirements.txt  # Or install google-antigravity, rich, httpx, etc.
+pip install -r requirements.txt   # google-antigravity, rich, prompt_toolkit (history + tab completion)
+pip install -r requirements-dev.txt  # adds pytest
+```
+
+Run the tests (no SDK, GPUs or network needed):
+```bash
+python3 -m pytest
 ```
 
 ### 2. Configure Bash Alias
@@ -131,6 +147,11 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/brainstorm <idea>` | Autonomous Spec-Driven Loop (Cloud Spec ➔ ROCm Build ➔ Dual Review ➔ Commit) |
 | `/search <query>` | Live web search (DuckDuckGo + GitHub) with clean formatted snippets |
 | `/fetch <url>` | Fetch web documentation and distill HTML into clean Markdown |
+| `/diff [n]` | Show file changes from the nth latest turn that edited files (default 1) |
+| `/undo` | Revert the latest turn's file changes (lists files and asks first) |
+| `/stats [reset]` | Per-target tokens, avg tok/s, TTFT, time, escalations, errors |
+| `/markdown [on\|off]` | Toggle rendered Markdown for responses |
+| `/prefs [reset]` | Show or reset saved preferences |
 | `/reload` | Hot-reload code in-place preserving context |
 | `/help` | Display full command reference |
 
@@ -143,3 +164,16 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `<Enter>` on empty line | Submits multi-line prompt input. |
 | `<Ctrl+D>` | Alternative instant submit for multi-line inputs. |
 
+---
+
+## 🪝 Lifecycle Hook Events (`hooks.json`)
+
+Each event maps to a list of `{"matcher": ..., "hooks": [{"command": ..., "timeout": ...}]}` groups. Commands receive JSON on stdin and may answer with JSON on stdout.
+
+| Event | Payload highlights | Useful replies |
+| :--- | :--- | :--- |
+| `PreToolUse` | `toolCall.name`, `toolCall.args` | `{"decision":"deny","reason":...}`, `{"overwrite":{...}}` |
+| `PostToolUse` | `toolCall`, `output`, `error` | informational |
+| `PreTurn` (alias `PreInvocation`) | `prompt` | `{"decision":"deny"}`, `{"overwrite":{"prompt":...}}`, `{"context":"..."}` |
+| `PostTurn` (alias `PostInvocation`) | `prompt`, `response` | informational |
+| `Stop` | `prompt`, `response` | `{"decision":"block","reason":...}` re-prompts the agent with the reason (max 2 times per turn) |

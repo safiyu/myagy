@@ -24,6 +24,7 @@ except ImportError:
     pass
 
 from ..terminal.ui import UI, RICH_AVAILABLE, console
+from ..terminal.esc_listener import prompt_input
 from ..config import PLANS_DIR
 from ..context.repomap import RepoMap
 from ..context.instructions import ProjectInstructions
@@ -66,7 +67,7 @@ class BrainstormWorkflow:
 
     @classmethod
     def _get_git_diff(cls, repo_root: str = ".") -> str:
-        """Returns the unstaged and staged git diff of the repository."""
+        """Returns the staged/unstaged git diff plus synthetic diffs for untracked files."""
         try:
             res = subprocess.run(
                 ["git", "diff", "HEAD"],
@@ -75,9 +76,31 @@ class BrainstormWorkflow:
                 text=True,
                 timeout=10,
             )
-            return res.stdout.strip()
+            parts = [res.stdout.strip()] if res.stdout.strip() else []
+            for rel in sorted(cls._git_paths(repo_root, untracked_only=True)):
+                try:
+                    with open(os.path.join(repo_root, rel), "r", encoding="utf-8") as f:
+                        body = f.read(20000)
+                except Exception:
+                    continue
+                added = "\n".join("+" + ln for ln in body.splitlines())
+                parts.append(f"diff --git a/{rel} b/{rel}\nnew file\n--- /dev/null\n+++ b/{rel}\n{added}")
+            return "\n".join(parts).strip()
         except Exception:
             return ""
+
+    @classmethod
+    def _git_paths(cls, repo_root: str = ".", untracked_only: bool = False) -> set:
+        """Lists modified, deleted and untracked paths (ignored files excluded)."""
+        flags = ["-o"] if untracked_only else ["-m", "-o", "-d"]
+        try:
+            res = subprocess.run(
+                ["git", "ls-files", *flags, "--exclude-standard"],
+                cwd=repo_root, capture_output=True, text=True, timeout=10,
+            )
+            return {ln for ln in res.stdout.splitlines() if ln.strip()}
+        except Exception:
+            return set()
 
     @classmethod
     async def execute_workflow(cls, idea: str, session: Any, repo_root: str = "."):
@@ -89,6 +112,11 @@ class BrainstormWorkflow:
         slug = cls._slugify(idea)
         os.makedirs(PLANS_DIR, exist_ok=True)
         plan_path = os.path.join(PLANS_DIR, f"{slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+
+        # Files already dirty before the run are excluded from the final commit
+        dirty_before = cls._git_paths(repo_root)
+        if dirty_before:
+            print(UI.warn(f"{len(dirty_before)} file(s) already modified before this run will be left out of the commit."))
 
         print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}SPEC-DRIVEN WORKFLOW INITIALIZED{UI.RST}{UI.DARK_GRAY} ─────────────────────────────╮{UI.RST}")
         print(f"{UI.DARK_GRAY}│{UI.RST}  Idea   : {UI.CYAN}{idea}{UI.RST}")
@@ -114,7 +142,7 @@ class BrainstormWorkflow:
             "Begin directly with the Markdown plan. Do not include conversational filler."
         )
 
-        plan_content = await session.chat_cloud_oauth(brainstorm_prompt)
+        plan_content = await session.chat_cloud_oauth(brainstorm_prompt, with_project_context=False)
         if not plan_content.strip():
             print(UI.err("Failed to generate plan from Cloud Gemini."))
             return
@@ -136,7 +164,7 @@ class BrainstormWorkflow:
         print(f"{UI.AMBER_BOLD}╰────────────────────────────────────────────────────────────────────╯{UI.RST}")
 
         try:
-            choice = (await asyncio.to_thread(input, f"{UI.AMBER_BOLD}Approve plan for implementation? [y/N]: {UI.RST}")).strip().lower()
+            choice = (await asyncio.to_thread(prompt_input, f"{UI.AMBER_BOLD}Approve plan for implementation? [y/N]: {UI.RST}")).strip().lower()
         except (KeyboardInterrupt, EOFError):
             print(UI.warn("\nWorkflow aborted by user."))
             return
@@ -192,7 +220,7 @@ class BrainstormWorkflow:
             print(UI.warn("No git changes detected after implementation phase."))
             return
 
-        print(f"\n{UI.CUDA_BOLD}[Phase 4/5: Local Functional Code Review on Port 9000/9001]{UI.RST}")
+        print(f"\n{UI.CUDA_BOLD}[Phase 4/5: Local Functional Code Review on AMD ROCm (:9000)]{UI.RST}")
         local_review_prompt = (
             f"Perform a concise functional code review of this git diff:\n\n```diff\n{diff_text[:6000]}\n```\n\n"
             f"Check for:\n"
@@ -214,13 +242,13 @@ class BrainstormWorkflow:
             f"3. Performance regressions\n"
             f"If critical bugs exist, list the exact fix. If clean, state 'VERIFIED_CLEAN'."
         )
-        cloud_review = await session.chat_cloud_oauth(cloud_review_prompt)
+        cloud_review = await session.chat_cloud_oauth(cloud_review_prompt, with_project_context=False)
 
         if "VERIFIED_CLEAN" not in cloud_review.upper() and len(cloud_review.strip()) > 30:
             print(f"\n{UI.AMBER_BOLD}Cloud Reviewer identified potential improvements or edge cases:{UI.RST}\n")
             print(cloud_review)
             try:
-                apply_fixes = (await asyncio.to_thread(input, f"\n{UI.AMBER_BOLD}Apply Cloud Reviewer fixes locally on ROCm? [y/N]: {UI.RST}")).strip().lower()
+                apply_fixes = (await asyncio.to_thread(prompt_input, f"\n{UI.AMBER_BOLD}Apply Cloud Reviewer fixes locally on ROCm? [y/N]: {UI.RST}")).strip().lower()
                 if apply_fixes in ("y", "yes"):
                     print(f"{UI.ROCM_BOLD}Applying reviewer recommendations...{UI.RST}")
                     fix_cloud_prompt = (
@@ -242,9 +270,13 @@ class BrainstormWorkflow:
         print(f"{UI.DARK_GRAY}╰────────────────────────────────────────────────────────────────────────╯{UI.RST}")
 
         try:
-            do_commit = (await asyncio.to_thread(input, f"{UI.GREEN_BOLD}Commit these changes to git? [y/N]: {UI.RST}")).strip().lower()
+            do_commit = (await asyncio.to_thread(prompt_input, f"{UI.GREEN_BOLD}Commit these changes to git? [y/N]: {UI.RST}")).strip().lower()
             if do_commit in ("y", "yes"):
-                subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+                to_add = sorted(cls._git_paths(repo_root) - dirty_before)
+                if not to_add:
+                    print(UI.warn("No new changes to commit."))
+                    return
+                subprocess.run(["git", "add", "-A", "--", *to_add], cwd=repo_root, check=True)
                 subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_root, check=True)
                 print(UI.ok(f"Changes successfully committed: '{commit_msg}'"))
             else:

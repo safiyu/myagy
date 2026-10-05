@@ -19,12 +19,75 @@ except ImportError:
 from ..config import (
     MCP_CONFIG_PATH,
     DEFAULT_CLOUD_MODEL,
+    HISTORY_PATH,
 )
 from .ui import UI, RICH_AVAILABLE, console
+from ..core.prefs import PREF_DEFAULTS, load_prefs, reset_prefs
 from ..core.llamashift import trigger_llamashift_switch
 from ..context.mcp_loader import load_mcp_servers, McpStdioServer
 from ..core.session import MultiGpuHybridSession
-from .esc_listener import EscListener
+from .esc_listener import EscListener, prompt_input
+
+
+SLASH_COMMANDS = [
+    "/auto", "/9000", "/rocm", "/9001", "/cuda", "/cloud", "/gemini", "/models", "/model", "/mode",
+    "/spawn", "/tasks", "/subagent", "/repomap", "/instructions", "/hooks", "/mcp", "/compact",
+    "/autocompact", "/compactor", "/curation", "/context", "/ctx", "/save", "/load", "/sessions",
+    "/export", "/summarize", "/history", "/clear", "/status", "/metrics", "/verbose", "/steps",
+    "/permissions", "/laya", "/json", "/format", "/multiline", "/singleline", "/paste", "/reload",
+    "/brainstorm", "/search", "/fetch", "/diff", "/undo", "/stats", "/prefs", "/markdown", "/help",
+]
+AT_TARGETS = ["@rocm", "@cuda", "@cloud", "@auto", "@local", "@9000", "@9001"]
+_dynamic_targets: list = []
+_pt_session = None
+
+
+def set_completion_targets(ids) -> None:
+    """Registers model ids for @<id> completion."""
+    global _dynamic_targets
+    _dynamic_targets = [f"@{i}" for i in ids if i]
+
+
+def _get_pt_session():
+    """Lazily builds a prompt_toolkit session (history + completion); None if unavailable."""
+    global _pt_session
+    if _pt_session is not None:
+        return _pt_session or None
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.completion import Completer, Completion
+
+        class _InputCompleter(Completer):
+            def get_completions(self, document, complete_event):
+                text = document.text_before_cursor
+                if " " in text or "\n" in text:
+                    return
+                if text.startswith("/"):
+                    pool = SLASH_COMMANDS
+                elif text.startswith("@"):
+                    pool = AT_TARGETS + _dynamic_targets
+                else:
+                    return
+                for cand in pool:
+                    if cand.lower().startswith(text.lower()):
+                        yield Completion(cand, start_position=-len(text))
+
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        _pt_session = PromptSession(history=FileHistory(HISTORY_PATH), completer=_InputCompleter())
+    except Exception:
+        _pt_session = False
+    return _pt_session or None
+
+
+def _read_line(prompt: str) -> str:
+    """One line of input with history/completion on a TTY, plain input() otherwise."""
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        pt = _get_pt_session()
+        if pt is not None:
+            from prompt_toolkit.formatted_text import ANSI
+            return pt.prompt(ANSI(prompt))
+    return input(prompt)
 
 
 def read_input_prompt(first_prompt: str, multiline: bool = True) -> str:
@@ -36,12 +99,16 @@ def read_input_prompt(first_prompt: str, multiline: bool = True) -> str:
     - Pasted text with internal blank lines is preserved without prematurely submitting.
     """
     try:
-        first_line = input(first_prompt)
+        first_line = _read_line(first_prompt)
     except (EOFError, KeyboardInterrupt):
         return ""
 
     stripped = first_line.strip()
     if not multiline:
+        return stripped
+
+    # A multi-line paste arrives as one buffer when prompt_toolkit is active
+    if "\n" in first_line:
         return stripped
 
     # Slash commands and session exit keywords submit immediately on first Enter
@@ -98,6 +165,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
             print("=" * 65)
         session.print_status()
 
+    set_completion_targets([m['id'] for m in session.get_catalog() if m.get('type') == 'local'])
     loop = asyncio.get_event_loop()
     _current_task: Optional[asyncio.Task] = None
     _sigint_count = 0
@@ -326,6 +394,8 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(f"{UI.DARK_GRAY}╰─────────────────────────────────────────────────────────────────╯{UI.RST}\n")
                 elif cmd == "/clear":
                     session.history.clear()
+                    session._cached_curated_memory = None
+                    await session.reset_local_agent()
                     print(UI.ok("Conversation history cleared."))
                 elif cmd == "/mcp":
                     arg_low = arg.lower()
@@ -589,7 +659,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
                             print(f"{UI.DARK_GRAY}│{UI.RST}")
                             print(f"{UI.DARK_GRAY}│{UI.RST}  Active Hooks ({len(entries)}):")
                             for entry in entries:
-                                events = [ev for ev in ["PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop"] if entry["spec"].get(ev)]
+                                events = [ev for ev in ["PreToolUse", "PostToolUse", "PreTurn", "PostTurn", "PreInvocation", "PostInvocation", "Stop"] if entry["spec"].get(ev)]
                                 print(f"{UI.DARK_GRAY}│{UI.RST}    • {UI.WHITE}{entry['name']:20s}{UI.RST} ➔ Events: {UI.AMBER}{', '.join(events)}{UI.RST}")
                         else:
                             print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.GRAY}No hooks.json discovered in .agents/hooks.json or ~/.gemini/config/hooks.json{UI.RST}")
@@ -678,11 +748,22 @@ async def interactive_loop(session: MultiGpuHybridSession):
                 elif cmd in ("/reload", "/restart"):
                     if session.history:
                         session.save_session("latest_session")
+                    session.save_preferences()
                     print(f"\n{UI.CYAN}⚡ Hot-reloading antigravity_agent.py (preserving session context)...{UI.RST}\n")
-                    runner_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "antigravity_agent.py")
-                    new_args = [sys.executable, runner_script, "--load", "latest_session"]
-                    if session.dangerously_skip_permissions:
-                        new_args.append("-y")
+                    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    runner_script = os.path.join(pkg_root, "antigravity_agent.py")
+                    new_args = [sys.executable, runner_script, "--load", "latest_session", "--cloud-model", session.cloud_model]
+                    if session.active_target in ("auto", "9000", "9001", "cloud"):
+                        new_args += ["--target", session.active_target]
+                    new_args.append("-y" if session.dangerously_skip_permissions else "--safe")
+                    if session.verbose:
+                        new_args.append("--verbose")
+                    if session.json_output:
+                        new_args.append("--json")
+                    if not session.enable_mcp:
+                        new_args.append("--no-mcp")
+                    if not session.multiline_input:
+                        new_args.append("--single-line")
                     os.execv(sys.executable, new_args)
                 elif cmd in ("/brainstorm", "/spec", "/plan"):
                     from ..agents.brainstorm import BrainstormWorkflow
@@ -699,10 +780,72 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(f"\n{UI.AMBER_BOLD}[Esc]{UI.RST} {UI.AMBER}Brainstorm workflow stopped by user.{UI.RST}\n")
                     finally:
                         _current_task = None
+                elif cmd == "/diff":
+                    nth = int(arg) if arg.isdigit() else 1
+                    text = await asyncio.to_thread(session.turn_diff, nth)
+                    if not text:
+                        print(UI.warn("No recorded file changes for that turn (needs a git repo and a turn that edited files)."))
+                    else:
+                        stat = await asyncio.to_thread(session.turn_diff, nth, True)
+                        print(f"\n{UI.GRAY}{stat}{UI.RST}")
+                        for line in text.splitlines():
+                            if line.startswith("+") and not line.startswith("+++"):
+                                print(f"{UI.GREEN}{line}{UI.RST}")
+                            elif line.startswith("-") and not line.startswith("---"):
+                                print(f"{UI.RED}{line}{UI.RST}")
+                            elif line.startswith("@@") or line.startswith("diff "):
+                                print(f"{UI.CYAN}{line}{UI.RST}")
+                            else:
+                                print(line)
+                        print()
+                elif cmd == "/undo":
+                    plan = await asyncio.to_thread(session.undo_plan)
+                    if not plan or not plan["files"]:
+                        print(UI.warn("Nothing to undo: no recorded turn with file changes."))
+                    else:
+                        cp = plan["checkpoint"]
+                        print(f"\n{UI.AMBER_BOLD}Revert turn:{UI.RST} {cp['prompt']}")
+                        for path, st in sorted(plan["files"].items()):
+                            verb = {"A": "delete (created by turn)", "M": "restore", "D": "restore (deleted by turn)"}.get(st, "restore")
+                            print(f"  {UI.GRAY}{st}{UI.RST} {path} {UI.DARK_GRAY}-> {verb}{UI.RST}")
+                        ans = (await asyncio.to_thread(prompt_input, f"{UI.AMBER_BOLD}Revert these files? [y/N]: {UI.RST}")).strip().lower()
+                        if ans in ("y", "yes"):
+                            touched = await asyncio.to_thread(session.apply_undo, plan)
+                            print(UI.ok(f"Reverted {len(touched)} file(s). The model has been told."))
+                        else:
+                            print(UI.warn("Undo cancelled."))
+                elif cmd == "/stats":
+                    if arg.lower() == "reset":
+                        session.stats.clear()
+                        print(UI.ok("Usage ledger reset."))
+                    else:
+                        session.print_stats()
+                elif cmd in ("/markdown", "/md"):
+                    arg_low = arg.lower()
+                    if arg_low in ("on", "enable", "true", "1"):
+                        session.render_markdown = True
+                    elif arg_low in ("off", "disable", "false", "0"):
+                        session.render_markdown = False
+                    else:
+                        session.render_markdown = not session.render_markdown
+                    print(UI.ok(f"Markdown rendering of responses: {'ENABLED' if session.render_markdown else 'DISABLED (raw streaming)'}"))
+                elif cmd in ("/prefs", "/preferences"):
+                    if arg.lower() == "reset":
+                        reset_prefs()
+                        session.apply_preferences(PREF_DEFAULTS)
+                        session._active_local_agent = None
+                        print(UI.ok("Preferences reset to defaults."))
+                    else:
+                        print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}SAVED PREFERENCES (~/.myagy/config.json){UI.RST}{UI.DARK_GRAY} ─────────╮{UI.RST}")
+                        for k, v in session.preferences().items():
+                            print(f"{UI.DARK_GRAY}│{UI.RST}  {k:32s} {UI.CYAN}{v}{UI.RST}")
+                        print(f"{UI.DARK_GRAY}╰─────────────────────────────────────────────────────────────╯{UI.RST}")
+                        print(f"{UI.GRAY}Settings save automatically after each command. /prefs reset restores defaults.{UI.RST}\n")
                 elif cmd == "/help":
                     session.print_help()
                 else:
                     print(UI.warn(f"Unknown command '{cmd}'. Type /help for available commands."))
+                session.save_preferences()
                 continue
 
             # Handle one-shot @ prefixes
@@ -718,7 +861,7 @@ async def interactive_loop(session: MultiGpuHybridSession):
             elif lower_input.startswith(("@auto ", "@laya ")):
                 force_target, prompt = "auto", user_input.split(maxsplit=1)[1].strip()
             elif lower_input.startswith("@local "):
-                force_target = "9000" if session.active_target == "9000" else "9001"
+                force_target = session.resolve_target_alias("local")
                 prompt = user_input.split(maxsplit=1)[1].strip()
             elif lower_input.startswith("@") and " " in user_input:
                 first_tok, rest_prompt = user_input.split(maxsplit=1)
@@ -802,8 +945,8 @@ async def main():
         "--target",
         "--mode",
         choices=["auto", "9000", "9001", "rocm", "cuda", "cloud"],
-        default="rocm",
-        help="Initial active model target (defaults to 'rocm'/port 9000)",
+        default=None,
+        help="Initial active model target (default: saved preference, else 'rocm'/port 9000)",
     )
     parser.add_argument(
         "--auto",
@@ -833,13 +976,14 @@ async def main():
         "--yes",
         dest="dangerously_skip_permissions",
         action="store_true",
-        default=True,
+        default=None,
         help="Auto-approve all tool permission requests without prompting",
     )
     parser.add_argument(
         "--safe",
         dest="dangerously_skip_permissions",
         action="store_false",
+        default=None,
         help="Start in safe permission mode (prompts for bash commands)",
     )
     parser.add_argument(
@@ -879,7 +1023,7 @@ async def main():
         "--singleline",
         dest="multiline_input",
         action="store_false",
-        default=True,
+        default=None,
         help="Disable multi-line input by default (require single Enter to submit)",
     )
     parser.add_argument(
@@ -907,15 +1051,20 @@ async def main():
 
     args = parser.parse_args()
 
+    # Precedence: explicit CLI flag > saved preference > built-in default
+    prefs = load_prefs()
     session = MultiGpuHybridSession(
-        initial_target=args.target,
+        initial_target=args.target or prefs.get("active_target", "rocm"),
         cloud_model=args.cloud_model,
-        dangerously_skip_permissions=args.dangerously_skip_permissions,
+        dangerously_skip_permissions=args.dangerously_skip_permissions if args.dangerously_skip_permissions is not None else prefs.get("dangerously_skip_permissions", True),
+        use_laya_adaptive_permissions=prefs.get("use_laya_adaptive_permissions", True),
         enable_mcp=args.enable_mcp,
         json_output=args.json_output,
-        multiline_input=args.multiline_input,
-        verbose=args.verbose,
+        multiline_input=args.multiline_input if args.multiline_input is not None else prefs.get("multiline_input", True),
+        verbose=args.verbose or prefs.get("verbose", False),
     )
+    handled = {"active_target", "dangerously_skip_permissions", "use_laya_adaptive_permissions", "multiline_input", "verbose"}
+    session.apply_preferences({k: v for k, v in prefs.items() if k not in handled})
 
     if args.load_session:
         session.load_session(args.load_session)

@@ -9,17 +9,15 @@ import asyncio
 import urllib.request
 from typing import Optional, List, Dict, Any
 
-from google.antigravity import (
-    hooks,
-    types,
-)
-
 try:
     from rich.table import Table
     from rich.text import Text
     from rich import box
 except ImportError:
     pass
+
+from google.antigravity import Agent, LocalOpenAIAgentConfig, CapabilitiesConfig, hooks, types
+from google.antigravity.hooks import policy
 
 from ..terminal.ui import UI, RICH_AVAILABLE, console
 from ..core.coordinator import CudaCoordinator
@@ -41,6 +39,7 @@ class SubagentTask:
         self.tool_calls: List[Dict[str, Any]] = []
         self.error: Optional[str] = None
         self.injected: bool = False
+        self.mode: str = "pending"  # tools | no-tools (fallback)
         self._async_task: Optional[asyncio.Task] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -227,6 +226,91 @@ class SubagentManager:
             except Exception as e:
                 await asyncio.sleep(1.0)
 
+    TOOL_RUN_TIMEOUT = 300
+
+    @classmethod
+    async def _run_with_tools(cls, task: SubagentTask, session: Any, ep: Dict[str, Any]) -> str:
+        """Runs the task as a real tool-using agent on :9001 (same SDK path as the main agent)."""
+
+        @hooks.pre_tool_call_decide
+        def log_tool(call: types.ToolCall) -> types.HookResult:
+            task.tool_calls.append({"name": getattr(call, "name", str(call)), "args": getattr(call, "args", {}) or {}, "timestamp": time.time()})
+            return types.HookResult(allow=True)
+
+        def background_permission(tool: Any, args: Dict[str, Any]) -> bool:
+            # Background agents can't prompt the user: only Laya-approved safe actions run
+            name = getattr(tool, "name", str(tool))
+            safe, _ = session.laya.evaluate_action_safety(f"Tool: {name} Args: {json.dumps(args, default=str)}")
+            if not safe:
+                task.tool_calls.append({"name": f"{name} (denied: not auto-approved as safe)", "args": args, "timestamp": time.time()})
+            return safe
+
+        instructions = (
+            "You are an autonomous engineering sub-agent running in the background.\n"
+            f"TASK: {task.description}\n\n"
+            "GUIDELINES:\n"
+            "1. Use your tools to inspect files, search, and run read-only checks as needed.\n"
+            "2. Do not repeat identical tool calls. Prefer small, targeted reads.\n"
+            "3. If a tool call is denied, continue without it and say what you could not verify.\n"
+            "4. Finish with a dense, factual summary preserving file paths, function names and exact numbers."
+        )
+        config = LocalOpenAIAgentConfig(
+            model=ep.get("model") or ep.get("filename"),
+            base_url=ep.get("url", "http://localhost:9001/v1"),
+            system_instructions=instructions,
+            capabilities=CapabilitiesConfig(),
+            policies=policy.confirm_run_command(handler=background_permission),
+            hooks=[log_tool],
+        )
+        agent = Agent(config)
+        await agent.__aenter__()
+        try:
+            response = await agent.chat(task.description)
+            parts = []
+            async for token in response:
+                parts.append(token)
+            return "".join(parts).strip()
+        finally:
+            try:
+                await agent.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+    @classmethod
+    async def _run_plain(cls, task: SubagentTask, ep: Dict[str, Any]) -> str:
+        """Fallback: single chat completion with no tools."""
+        instructions = (
+            "You are a reasoning sub-agent running on the NVIDIA RTX 4060 accelerator.\n"
+            "You have NO tools: you cannot read files, run commands, or browse. Work only from the task text.\n\n"
+            f"TASK: {task.description}\n\n"
+            "GUIDELINES:\n"
+            "1. Answer from the information given; state clearly what you cannot verify without file or shell access.\n"
+            "2. Never invent file contents, command output, or numbers.\n"
+            "3. Conclude with a dense, structured summary and preserve any names and numbers from the task."
+        )
+        payload = {
+            "model": ep.get("filename") or "granite-4.2-8b",
+            "messages": [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": task.description},
+            ],
+            "max_tokens": 1500,
+            "temperature": 0.2,
+        }
+        req = urllib.request.Request(
+            "http://127.0.0.1:9001/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+        def _call_http():
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        data = await asyncio.to_thread(_call_http)
+        choice = data["choices"][0]["message"]
+        return (choice.get("content") or choice.get("reasoning_content") or "").strip()
+
     @classmethod
     async def _run_worker(cls, task: SubagentTask, session: Any):
         """Worker executing autonomously on NVIDIA RTX 4060 with tool access."""
@@ -252,50 +336,18 @@ class SubagentManager:
             if ep9001.get("status") != "online":
                 raise RuntimeError("NVIDIA RTX 4060 (Port 9001) is offline. Start it via llama-launcher or /compactor start.")
 
-            # 2. Hook to capture tool executions
-            @hooks.pre_tool_call_decide
-            def log_tool(call: types.ToolCall) -> types.HookResult:
-                c_name = getattr(call, "name", str(call))
-                c_args = getattr(call, "args", {}) or {}
-                task.tool_calls.append({"name": c_name, "args": c_args, "timestamp": time.time()})
-                return types.HookResult(allow=True)
+            res_text = None
+            try:
+                res_text = await asyncio.wait_for(cls._run_with_tools(task, session, ep9001), timeout=cls.TOOL_RUN_TIMEOUT)
+                task.mode = "tools"
+            except asyncio.CancelledError:
+                raise
+            except Exception as tool_err:
+                task.tool_calls.append({"name": "(tool agent unavailable, using plain completion)", "args": {"error": str(tool_err)[:200]}, "timestamp": time.time()})
 
-            subagent_instructions = (
-                "You are an expert autonomous sub-agent running on the NVIDIA RTX 4060 accelerator.\n"
-                "Your objective is to accomplish this specific background assignment:\n\n"
-                f"TASK: {task.description}\n\n"
-                "OPERATIONAL GUIDELINES:\n"
-                "1. Direct execution: Use tools (inspect files, search, check shell) as needed to resolve the task.\n"
-                "2. Conclude with a dense, structured, factual summary of your findings and completed changes.\n"
-                "3. Preserve file paths, function names, and exact numbers."
-            )
-
-            # 3. Execute on NVIDIA RTX 4060 (:9001) via high-speed chat completion
-            payload = {
-                "model": ep9001.get("filename") or "granite-4.2-8b",
-                "messages": [
-                    {"role": "system", "content": subagent_instructions},
-                    {"role": "user", "content": task.description},
-                ],
-                "max_tokens": 1500,
-                "temperature": 0.2,
-            }
-            req_data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                "http://127.0.0.1:9001/v1/chat/completions",
-                data=req_data,
-                headers={"Content-Type": "application/json"},
-            )
-
-            def _call_http():
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-
-            data = await asyncio.to_thread(_call_http)
-            choice = data["choices"][0]["message"]
-            res_text = (choice.get("content") or choice.get("reasoning_content") or "").strip()
-            if not res_text and choice.get("reasoning_content"):
-                res_text = choice.get("reasoning_content").strip()
+            if not res_text:
+                res_text = await cls._run_plain(task, ep9001)
+                task.mode = "no-tools"
 
             if res_text:
                 task.result = res_text
@@ -417,7 +469,8 @@ class SubagentManager:
         print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}SUBAGENT #{task.id} DETAILS{UI.RST}{UI.DARK_GRAY} ───────────────────────────────────────────────╮{UI.RST}")
         print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Task{UI.RST}       : {task.description}")
         print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Status{UI.RST}     : {task.status.upper()} ({dur_str})")
-        print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Engine{UI.RST}     : NVIDIA RTX 4060 (Port 9001 - IBM Granite 8B)")
+        mode_tag = {"tools": "with tools", "no-tools": "plain completion, no tools"}.get(task.mode, task.mode)
+        print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Engine{UI.RST}     : NVIDIA RTX 4060 (Port 9001 - IBM Granite 8B, {mode_tag})")
         print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Injected{UI.RST}   : {'YES' if task.injected else 'NO'}")
         if task.tool_calls:
             print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Tool Calls{UI.RST} : {len(task.tool_calls)} executed")

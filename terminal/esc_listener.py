@@ -9,6 +9,7 @@ import os
 import sys
 import select
 import threading
+import contextlib
 from typing import Callable, Optional
 
 try:
@@ -37,11 +38,18 @@ class EscListener:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._old_settings = None
+        self._cbreak_settings = None
         self._fd: Optional[int] = None
+        self._io_lock = threading.Lock()
+        self._paused = False
+
+    # Active listener, so prompts can pause it without a reference
+    _current: Optional["EscListener"] = None
 
     def __enter__(self):
         self.interrupted = False
         self._stop_event.clear()
+        EscListener._current = self
 
         # Check if stdin is an interactive terminal and termios is available
         if not TERMIOS_AVAILABLE or not sys.stdin.isatty():
@@ -61,6 +69,7 @@ class EscListener:
             new_settings[6][termios.VMIN] = 1
             new_settings[6][termios.VTIME] = 0
             termios.tcsetattr(self._fd, termios.TCSANOW, new_settings)
+            self._cbreak_settings = new_settings
 
             # Start listener background thread
             self._thread = threading.Thread(target=self._listen_loop, daemon=True, name="EscListenerThread")
@@ -75,14 +84,18 @@ class EscListener:
             return
 
         while not self._stop_event.is_set():
+            if self._paused:
+                self._stop_event.wait(0.02)
+                continue
             try:
-                # Poll with short 50ms timeout so thread exits promptly on stop_event
-                r, _, _ = select.select([self._fd], [], [], 0.05)
-                if not r or self._stop_event.is_set():
-                    continue
-
-                # Read 1 raw byte
-                b = os.read(self._fd, 1)
+                # Lock keeps pause() from racing a read that would steal prompt input
+                with self._io_lock:
+                    if self._paused:
+                        continue
+                    r, _, _ = select.select([self._fd], [], [], 0.05)
+                    if not r or self._stop_event.is_set():
+                        continue
+                    b = os.read(self._fd, 1)
                 if not b:
                     continue
 
@@ -121,6 +134,41 @@ class EscListener:
             except Exception:
                 break
 
+    def pause(self):
+        """Stops reading stdin and restores cooked mode so input() works normally."""
+        if self._fd is None or self._old_settings is None or self._paused:
+            return
+        self._paused = True
+        with self._io_lock:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+            except Exception:
+                pass
+
+    def resume(self):
+        """Re-enters cbreak mode and restarts ESC detection after a prompt."""
+        if not self._paused:
+            return
+        if self._fd is not None and self._cbreak_settings is not None:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSANOW, self._cbreak_settings)
+            except Exception:
+                pass
+        self._paused = False
+
+    @classmethod
+    @contextlib.contextmanager
+    def suspended(cls):
+        """Pauses the active listener (if any) for the duration of a prompt."""
+        listener = cls._current
+        if listener:
+            listener.pause()
+        try:
+            yield
+        finally:
+            if listener:
+                listener.resume()
+
     def _cleanup_terminal(self):
         if self._fd is not None and self._old_settings is not None:
             try:
@@ -133,6 +181,15 @@ class EscListener:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._stop_event.set()
+        if EscListener._current is self:
+            EscListener._current = None
+        self._paused = False
         self._cleanup_terminal()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.1)
+
+
+def prompt_input(prompt: str = "") -> str:
+    """input() that is safe to call while an ESC listener is active."""
+    with EscListener.suspended():
+        return input(prompt)

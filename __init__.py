@@ -17,46 +17,25 @@ from .config import (
     OAUTH_TOKEN_PATH,
 )
 
-from .terminal import (
-    UI,
-    RICH_AVAILABLE,
-    console,
-    EscListener,
-    read_input_prompt,
-    interactive_loop,
-    main,
-)
+# Heavy names load on first access so leaf modules (core.coordinator, core.prefs, ...) import without the SDK
+_LAZY = {
+    **{n: ".terminal" for n in ("UI", "RICH_AVAILABLE", "console", "EscListener", "read_input_prompt", "interactive_loop", "main")},
+    **{n: ".core" for n in ("MultiGpuHybridSession", "CudaCoordinator", "LayaDecisionEngine", "detect_port_model", "query_endpoint_model", "trigger_llamashift_switch", "get_llamashift_active", "get_llamashift_models")},
+    **{n: ".agents" for n in ("SubagentManager", "SubagentTask", "ContextCurator", "BrainstormWorkflow")},
+    **{n: ".context" for n in ("RepoMap", "ProjectInstructions", "ExternalHooksManager", "load_mcp_servers", "check_oauth_available", "McpStdioServer")},
+    "WebSearchEngine": ".tools",
+}
 
-from .core import (
-    MultiGpuHybridSession,
-    CudaCoordinator,
-    LayaDecisionEngine,
-    detect_port_model,
-    query_endpoint_model,
-    trigger_llamashift_switch,
-    get_llamashift_active,
-    get_llamashift_models,
-)
 
-from .agents import (
-    SubagentManager,
-    SubagentTask,
-    ContextCurator,
-    BrainstormWorkflow,
-)
+def __getattr__(name):
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    value = getattr(importlib.import_module(module, __name__), name)
+    globals()[name] = value
+    return value
 
-from .context import (
-    RepoMap,
-    ProjectInstructions,
-    ExternalHooksManager,
-    load_mcp_servers,
-    check_oauth_available,
-    McpStdioServer,
-)
-
-from .tools import (
-    WebSearchEngine,
-)
 
 __all__ = [
     # Core

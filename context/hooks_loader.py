@@ -123,7 +123,10 @@ class ExternalHooksManager:
             stdout = proc.stdout.strip()
             if stdout:
                 try:
-                    return json.loads(stdout)
+                    parsed = json.loads(stdout)
+                    if isinstance(parsed, dict):
+                        return parsed
+                    return {"raw_output": stdout, "exit_code": proc.returncode}
                 except Exception:
                     # Output wasn't valid JSON, return stdout string representation
                     return {"raw_output": stdout, "exit_code": proc.returncode}
@@ -132,6 +135,61 @@ class ExternalHooksManager:
             return {"error": f"Hook timed out after {timeout}s"}
         except Exception as e:
             return {"error": str(e)}
+
+    TURN_EVENT_ALIASES = {
+        "PreTurn": ("PreTurn", "PreInvocation"),
+        "PostTurn": ("PostTurn", "PostInvocation"),
+        "Stop": ("Stop",),
+    }
+
+    @classmethod
+    def run_turn_event(cls, session_obj: Any, event: str, payload: Dict[str, Any], repo_root: str = ".") -> Dict[str, Any]:
+        """
+        Runs PreTurn / PostTurn / Stop hooks and returns a verdict dict:
+          PreTurn: {"deny": True, "reason"} or {"prompt": <possibly rewritten/prefixed prompt>}
+          Stop:    {"block": True, "reason"} to make the agent keep working
+          PostTurn: informational only
+        """
+        entries, _ = cls.load_hook_configs(repo_root)
+        prompt = payload.get("prompt")
+        extra_context = []
+
+        for entry in entries:
+            for spec_key in cls.TURN_EVENT_ALIASES.get(event, (event,)):
+                groups = entry["spec"].get(spec_key) or []
+                if not isinstance(groups, list):
+                    continue
+                for group in groups:
+                    if not isinstance(group, dict):
+                        continue
+                    for h in group.get("hooks", []):
+                        cmd = h.get("command") if isinstance(h, dict) else None
+                        if not cmd:
+                            continue
+                        body = dict(payload)
+                        body.update({
+                            "event": event,
+                            "conversationId": getattr(session_obj, "conversation_id", "myagy-session"),
+                            "modelName": session_obj.active_target,
+                        })
+                        result = cls.execute_command_hook(cmd, entry["base_dir"], body, timeout=h.get("timeout", 30))
+                        decision = str(result.get("decision", "")).lower()
+                        reason = str(result.get("reason", ""))
+
+                        if event == "PreTurn":
+                            if decision == "deny":
+                                return {"deny": True, "reason": reason}
+                            overwrite = result.get("overwrite")
+                            if isinstance(overwrite, dict) and isinstance(overwrite.get("prompt"), str):
+                                prompt = overwrite["prompt"]
+                            if isinstance(result.get("context"), str) and result["context"].strip():
+                                extra_context.append(result["context"].strip())
+                        elif event == "Stop" and decision in ("block", "deny"):
+                            return {"block": True, "reason": reason or "Completion condition not met."}
+
+        if prompt is not None and extra_context:
+            prompt = "\n".join(extra_context) + "\n\n" + prompt
+        return {"prompt": prompt}
 
     @classmethod
     def build_lifecycle_hooks(
@@ -246,7 +304,11 @@ class ExternalHooksManager:
             @hooks.post_tool_call
             def external_post_tool(res: types.ToolResult):
                 call = getattr(res, "call", None)
-                c_name = getattr(call, "name", "unknown") if call else "unknown"
+                last = getattr(session_obj, "_last_tool_call", None) or {}
+                c_name = (getattr(call, "name", None) if call else None) or last.get("name", "unknown")
+                c_args = (getattr(call, "args", None) if call else None) or last.get("args", {})
+                output = getattr(res, "result", None)
+                output_text = (output if isinstance(output, str) else json.dumps(output, default=str)) if output is not None else ""
 
                 for handler in post_tool_handlers:
                     pattern = handler["matcher"]
@@ -265,6 +327,8 @@ class ExternalHooksManager:
                         continue
 
                     payload = {
+                        "toolCall": {"name": c_name, "args": c_args},
+                        "output": output_text[:4000],
                         "error": str(res.error) if res.error else "",
                         "conversationId": getattr(session_obj, "conversation_id", "myagy-session"),
                         "modelName": session_obj.active_target,

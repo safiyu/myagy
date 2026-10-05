@@ -9,7 +9,15 @@ from .llamashift import (
     get_llamashift_active,
     get_llamashift_models,
 )
-from .session import MultiGpuHybridSession
+
+
+def __getattr__(name):
+    # Lazy so leaf modules import without pulling in the SDK or a circular agents<->core import
+    if name == "MultiGpuHybridSession":
+        from .session import MultiGpuHybridSession
+        return MultiGpuHybridSession
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "MultiGpuHybridSession",

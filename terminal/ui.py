@@ -81,3 +81,45 @@ class UI:
     @classmethod
     def err(cls, text: str) -> str:
         return f"{cls.RED_BOLD}[✗]{cls.RST} {cls.RED}{text}{cls.RST}"
+
+
+class StreamRenderer:
+    """Streams model output: live-rendered Markdown with rich, raw tokens otherwise."""
+
+    def __init__(self, markdown: bool = True, enabled: bool = True):
+        self.enabled = enabled
+        self._md = bool(markdown and RICH_AVAILABLE and enabled)
+        self._live = None
+        self._buf = []
+        self.started = False
+
+    def feed(self, text: str):
+        if not self.enabled or not text:
+            return
+        self.started = True
+        if self._md:
+            self._buf.append(text)
+            if self._live is None:
+                self._live = Live(
+                    Markdown("".join(self._buf)), console=console,
+                    refresh_per_second=8, vertical_overflow="visible",
+                )
+                self._live.start()
+            else:
+                self._live.update(Markdown("".join(self._buf)))
+        else:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    def stop(self):
+        """Finalizes output; safe to call multiple times."""
+        if self._live is not None:
+            try:
+                self._live.update(Markdown("".join(self._buf)))
+                self._live.stop()
+            finally:
+                self._live = None
+        elif self.started and not self._md and self.enabled:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        self.started = False
