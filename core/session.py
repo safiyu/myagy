@@ -845,6 +845,7 @@ class MultiGpuHybridSession:
                     state = su.get("state")
 
                     if stype == "tool" and state == "ACTIVE" and not self.json_output:
+                        renderer.stop()
                         tool_name = su.get("tool_name", "tool")
                         params = su.get("tool_info", {}).get("parameters", {})
                         summary = (

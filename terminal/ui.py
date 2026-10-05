@@ -1,6 +1,7 @@
 """Terminal styling, curated 256-color palette, and box decorations."""
 
 import os
+import re
 import sys
 
 try:
@@ -84,13 +85,13 @@ class UI:
 
 
 class StreamRenderer:
-    """Streams model output: live-rendered Markdown with rich, raw tokens otherwise."""
+    """Streams model output: block-rendered Markdown with rich, raw tokens otherwise."""
 
     def __init__(self, markdown: bool = True, enabled: bool = True):
         self.enabled = enabled
         self._md = bool(markdown and RICH_AVAILABLE and enabled)
-        self._live = None
-        self._buf = []
+        self._buf = ""
+        self._in_code_block = False
         self.started = False
 
     def feed(self, text: str):
@@ -98,28 +99,80 @@ class StreamRenderer:
             return
         self.started = True
         if self._md:
-            self._buf.append(text)
-            if self._live is None:
-                self._live = Live(
-                    Markdown("".join(self._buf)), console=console,
-                    refresh_per_second=8, vertical_overflow="visible",
-                )
-                self._live.start()
-            else:
-                self._live.update(Markdown("".join(self._buf)))
+            self._buf += text
+            self._process_buffer()
         else:
             sys.stdout.write(text)
             sys.stdout.flush()
 
+    def _render_block(self, block: str):
+        b = block.strip()
+        if not b or not console:
+            return
+        console.print(Markdown(b))
+
+    def _process_buffer(self):
+        while True:
+            # Check for code fence start
+            if not self._in_code_block:
+                fence_pos = self._buf.find("```")
+                if fence_pos != -1:
+                    before = self._buf[:fence_pos].strip()
+                    if before:
+                        self._render_block(before)
+                    self._buf = self._buf[fence_pos:]
+                    self._in_code_block = True
+                    continue
+
+            # Inside code block: wait for closing fence on its own line
+            if self._in_code_block:
+                closing_pos = self._buf.find("```", 3)
+                if closing_pos != -1:
+                    nl_pos = self._buf.find("\n", closing_pos)
+                    if nl_pos != -1:
+                        code_block = self._buf[:nl_pos + 1]
+                        self._buf = self._buf[nl_pos + 1:]
+                        self._in_code_block = False
+                        self._render_block(code_block)
+                        continue
+                break
+
+            # Paragraph or block break (double newline)
+            dbl_nl = self._buf.find("\n\n")
+            if dbl_nl != -1:
+                block = self._buf[:dbl_nl].strip()
+                self._buf = self._buf[dbl_nl + 2:]
+                if block:
+                    self._render_block(block)
+                continue
+
+            # Heading, horizontal rule, blockquote, or list item ending with newline
+            nl = self._buf.find("\n")
+            if nl != -1:
+                line = self._buf[:nl].strip()
+                if line.startswith(("#", "---", "***", "___", ">")) or (line.startswith("|") and line.endswith("|")):
+                    self._buf = self._buf[nl + 1:]
+                    if line:
+                        self._render_block(line)
+                    continue
+                if re.match(r"^(\s*[-*+]|\s*\d+\.)\s+", line):
+                    self._buf = self._buf[nl + 1:]
+                    if line:
+                        self._render_block(line)
+                    continue
+
+            break
+
     def stop(self):
         """Finalizes output; safe to call multiple times."""
-        if self._live is not None:
-            try:
-                self._live.update(Markdown("".join(self._buf)))
-                self._live.stop()
-            finally:
-                self._live = None
+        if self._md:
+            rem = self._buf.strip()
+            if rem:
+                self._render_block(rem)
+            self._buf = ""
+            self._in_code_block = False
         elif self.started and not self._md and self.enabled:
             sys.stdout.write("\n")
             sys.stdout.flush()
         self.started = False
+

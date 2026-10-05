@@ -47,3 +47,44 @@ def test_stop_is_idempotent(monkeypatch):
     r.feed("x")
     r.stop()
     r.stop()
+
+
+def test_markdown_no_duplicate_lines_on_multiblock(monkeypatch):
+    buf = _capture(monkeypatch)
+    r = ui.StreamRenderer(markdown=True)
+    tokens = [
+        "# Architectural Plan\n\n",
+        "UniqueParagraphA: First paragraph content.\n\n",
+        "---\n\n",
+        "UniqueParagraphB: Second paragraph content.\n\n",
+        "```python\ndef unique_func():\n    return 42\n```\n",
+        "- UniqueItem1\n",
+        "- UniqueItem2\n\n",
+        "UniqueConclusion: Final sentence.",
+    ]
+    for tok in tokens:
+        r.feed(tok)
+    r.stop()
+    out = buf.getvalue()
+    assert out.count("UniqueParagraphA") == 1
+    assert out.count("UniqueParagraphB") == 1
+    assert out.count("unique_func") == 1
+    assert out.count("UniqueItem1") == 1
+    assert out.count("UniqueItem2") == 1
+    assert out.count("UniqueConclusion") == 1
+
+
+def test_stream_renderer_reset_between_segments(monkeypatch):
+    """Verify that calling stop() finalizes a segment and allows a fresh segment without repeating previous text."""
+    buf = _capture(monkeypatch)
+    r = ui.StreamRenderer(markdown=True)
+    r.feed("SegmentOne: Introductory text.\n\n")
+    r.stop()
+    assert "SegmentOne" in buf.getvalue()
+
+    r.feed("SegmentTwo: Followup text after tool.\n\n")
+    r.stop()
+    out = buf.getvalue()
+    assert out.count("SegmentOne") == 1
+    assert out.count("SegmentTwo") == 1
+
