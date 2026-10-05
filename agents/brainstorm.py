@@ -3,8 +3,8 @@ Spec-Driven Autonomous Lifecycle Workflow (/brainstorm):
   1. Cloud (Gemini OAuth): Gathers inputs, codebase AST & guidelines -> drafts implementation plan.
   2. Gate 1: Interactive user approval/refinement of the plan.
   3. Local (AMD ROCm :9000): Executes implementation edits milestone by milestone.
-  4. Build & Test: Automatically runs project tests/build commands and self-heals errors.
-  5. Local Code Review: Analyzes git diff on local models.
+  4. NVIDIA Subagent (:9001): Executes automated build/test suite and diagnoses self-healing errors.
+  5. Local Code Review: Analyzes git diff on NVIDIA RTX 4060 (:9001).
   6. Cloud Adversarial Review (Gemini): Scrutinizes edge cases, security vulnerabilities, and bugs.
   7. Gate 2: User approval of reviewed changes -> automated git commit.
 """
@@ -120,7 +120,7 @@ class BrainstormWorkflow:
 
         print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}SPEC-DRIVEN WORKFLOW INITIALIZED{UI.RST}{UI.DARK_GRAY} ─────────────────────────────╮{UI.RST}")
         print(f"{UI.DARK_GRAY}│{UI.RST}  Idea   : {UI.CYAN}{idea}{UI.RST}")
-        print(f"{UI.DARK_GRAY}│{UI.RST}  Phases : Cloud Plan ➔ Approval ➔ ROCm Build ➔ Dual Review ➔ Commit")
+        print(f"{UI.DARK_GRAY}│{UI.RST}  Phases : Cloud Plan ➔ Approval ➔ ROCm Code ➔ NVIDIA Build Subagent ➔ Dual Review ➔ Commit")
         print(f"{UI.DARK_GRAY}╰────────────────────────────────────────────────────────────────────────╯\n")
 
         # ── PHASE 1: Cloud Brainstorming & Spec Drafting ──────────────────
@@ -184,33 +184,43 @@ class BrainstormWorkflow:
 
         await session.chat_turn(implement_prompt, target="9000")
 
-        # ── PHASE 3: Automatic Build & Test Verification ─────────────────
-        print(f"\n{UI.CUDA_BOLD}[Phase 3/5: Verification & Automated Self-Healing Tests]{UI.RST}")
+        # ── PHASE 3: Autonomous Build & Test Verification on NVIDIA Subagent (:9001) ──
+        print(f"\n{UI.CUDA_BOLD}[Phase 3/5: Verification & Automated Self-Healing Tests on NVIDIA Subagent (:9001)]{UI.RST}")
         test_cmd = cls._detect_test_command(repo_root)
         if test_cmd:
-            print(f"{UI.GRAY}Detected test suite command: {UI.WHITE}{test_cmd}{UI.RST}")
-            try:
-                proc = await asyncio.create_subprocess_shell(
-                    test_cmd,
-                    cwd=repo_root,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-                out_text = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
+            print(f"{UI.CUDA}⚡ Pushing build & test suite to NVIDIA RTX 4060 Subagent: {UI.WHITE}{test_cmd}{UI.RST}")
+            build_subagent = session.run_build_subagent(custom_cmd=test_cmd, repo_root=repo_root)
 
-                if proc.returncode == 0:
-                    print(f"{UI.GREEN_BOLD}✓ Automated tests PASSED cleanly.{UI.RST}")
+            # Await subagent completion
+            while build_subagent.status in ("queued", "running"):
+                await asyncio.sleep(0.4)
+
+            if build_subagent.status == "completed":
+                print(f"\n{UI.CUDA_BOLD}⚡ NVIDIA Subagent Build & Test Report:{UI.RST}")
+                if RICH_AVAILABLE and not session.json_output:
+                    console.print(Panel(Markdown(build_subagent.result or ""), title="[bold green]NVIDIA Subagent Diagnostics[/bold green]", border_style="green"))
                 else:
-                    print(f"{UI.AMBER_BOLD}⚠ Test failures detected. Engaging ROCm to fix issues...{UI.RST}")
+                    print(build_subagent.result)
+
+                # Check if failure was diagnosed or exit code != 0
+                is_failed = False
+                res_upper = (build_subagent.result or "").upper()
+                if "FAIL" in res_upper or "ERROR" in res_upper or build_subagent.error:
+                    if not ("PASS" in res_upper and "0 FAIL" in res_upper and "NO ERROR" in res_upper):
+                        is_failed = True
+
+                if not is_failed:
+                    print(f"\n{UI.GREEN_BOLD}✓ Automated tests PASSED cleanly via NVIDIA Subagent.{UI.RST}")
+                else:
+                    print(f"\n{UI.AMBER_BOLD}⚠ Test failures identified by NVIDIA Subagent. Engaging ROCm to apply diagnosed fixes...{UI.RST}")
                     fix_prompt = (
-                        f"The automated test command '{test_cmd}' failed with return code {proc.returncode}:\n\n"
-                        f"--- [TEST OUTPUT] ---\n{out_text[-2500:]}\n--- [END OUTPUT] ---\n\n"
-                        f"Inspect the failure, edit the code using your tools, and resolve the issue."
+                        f"The NVIDIA RTX 4060 Subagent executed the test/build command '{test_cmd}' and diagnosed the following failures:\n\n"
+                        f"--- [SUBAGENT DIAGNOSIS] ---\n{build_subagent.result}\n--- [END DIAGNOSIS] ---\n\n"
+                        f"Inspect the diagnosed root causes, use your tools (edit_file, write_to_file) to resolve the issues."
                     )
                     await session.chat_turn(fix_prompt, target="9000")
-            except Exception as test_err:
-                print(f"{UI.GRAY}[Test runner skipped: {test_err}]{UI.RST}")
+            else:
+                print(f"{UI.RED_BOLD}✗ NVIDIA Subagent build execution failed: {build_subagent.error}{UI.RST}")
         else:
             print(f"{UI.GRAY}No automated test script detected. Skipping Phase 3 test run.{UI.RST}")
 
@@ -220,7 +230,9 @@ class BrainstormWorkflow:
             print(UI.warn("No git changes detected after implementation phase."))
             return
 
-        print(f"\n{UI.CUDA_BOLD}[Phase 4/5: Local Functional Code Review on AMD ROCm (:9000)]{UI.RST}")
+        review_target = "9001" if session.endpoints.get("9001", {}).get("status") == "online" else "9000"
+        target_name = session.endpoints.get(review_target, {}).get("name", review_target)
+        print(f"\n{UI.CUDA_BOLD}[Phase 4/5: Local Functional Code Review on {target_name}]{UI.RST}")
         local_review_prompt = (
             f"Perform a concise functional code review of this git diff:\n\n```diff\n{diff_text[:6000]}\n```\n\n"
             f"Check for:\n"
@@ -229,7 +241,7 @@ class BrainstormWorkflow:
             f"3. Style or formatting issues\n"
             f"Provide a short bulleted list of issues or verify that the changes are sound."
         )
-        await session.chat_turn(local_review_prompt, target="9000")
+        await session.chat_turn(local_review_prompt, target=review_target)
 
         # ── PHASE 5: Cloud Adversarial Second-Opinion Code Review ─────────
         print(f"\n{UI.CLOUD_BOLD}[Phase 5/5: Cloud Adversarial Second-Opinion Review via Gemini]{UI.RST}")

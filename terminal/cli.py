@@ -329,6 +329,20 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(UI.ok("Permissions: SAFE MODE"))
                     else:
                         print(UI.warn("Usage: /permissions auto | skip | safe"))
+                elif cmd in ("/git-shift", "/gitshift", "/autoshift"):
+                    arg_low = arg.lower().strip()
+                    if arg_low in ("on", "true", "1", "enable"):
+                        session.auto_git_shift = True
+                        print(UI.ok(f"Git Auto-Shift: ENABLED ({session.fast_git_model} for git/tools ↔ {session.dense_code_model} for deep code)"))
+                    elif arg_low in ("off", "false", "0", "disable"):
+                        session.auto_git_shift = False
+                        print(UI.ok("Git Auto-Shift: DISABLED (manual model control)"))
+                    elif not arg_low:
+                        session.auto_git_shift = not session.auto_git_shift
+                        st = f"ENABLED ({session.fast_git_model} for git ↔ {session.dense_code_model} for deep code)" if session.auto_git_shift else "DISABLED"
+                        print(UI.ok(f"Git Auto-Shift: {st}"))
+                    else:
+                        print(UI.warn("Usage: /git-shift [on|off]"))
                 elif cmd == "/laya":
                     print(f"\n{UI.DARK_GRAY}╭─── {UI.LAYA_BOLD}LAYA SYSTEM 1 DECISION ENGINE (Convai Innovations){UI.RST}{UI.DARK_GRAY} ─────╮{UI.RST}")
                     print(f"{UI.DARK_GRAY}│{UI.RST}  {UI.WHITE}Backbone{UI.RST}     : {UI.LAYA}ModernBERT-large (~421M params, Non-Autoregressive){UI.RST}")
@@ -566,6 +580,11 @@ async def interactive_loop(session: MultiGpuHybridSession):
                     else:
                         # Full argument string is treated as a new task description
                         session.spawn_subagent(arg)
+                elif cmd in ("/build", "/test"):
+                    custom_cmd = arg.strip() if arg else None
+                    task = session.run_build_subagent(custom_cmd=custom_cmd, repo_root=".")
+                    if not session.json_output:
+                        print(f"{UI.CUDA}⚡ Pushed build & test verification to NVIDIA Subagent #{task.id} (Port 9001). Type {UI.CYAN}/subagent view {task.id}{UI.CUDA} to inspect.{UI.RST}\n")
                 elif cmd in ("/tasks", "/subagents"):
                     session.print_subagents()
                 elif cmd in ("/cuda", "/coordinator"):

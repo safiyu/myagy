@@ -22,7 +22,7 @@ An asynchronous, dual-accelerator pairing framework and terminal copilot built o
 * **Lifecycle Hooks Engine (`hooks_loader.py`)**:
   * Discovers `.agents/hooks.json` and `~/.gemini/config/hooks.json`, executing `PreToolUse` security gates, parameter overwrites, and `PostToolUse` linters.
 * **Autonomous Spec-Driven Workflow (`brainstorm.py` / `/brainstorm`)**:
-  * Hybrid pipeline: Cloud Gemini (architecture & spec) ➔ User Approval ➔ AMD ROCm (implementation & self-healing test run) ➔ Local & Cloud Dual Review ➔ User Approval ➔ Git Commit.
+  * Hybrid pipeline: Cloud Gemini (architecture & spec) ➔ User Approval ➔ AMD ROCm (implementation) ➔ NVIDIA Subagent (build & test verification) ➔ Local & Cloud Dual Review ➔ User Approval ➔ Git Commit.
 * **Live Web Search & Documentation Scraper (`web_search.py` / `/search`, `/fetch`)**:
   * Zero external pip dependencies: multi-source live web search (DuckDuckGo + GitHub) and HTML-to-clean-Markdown webpage extractor.
 * **Per-Turn Checkpoints (`/diff`, `/undo`)**:
@@ -128,6 +128,7 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/models` | List all local and cloud models in catalog |
 | `/model <# or id>` | Hot-swap active model on the fly |
 | `/spawn <task>` | Enqueue background task on NVIDIA RTX 4060 (FIFO serialized) |
+| `/build [cmd]` | Push project build & test verification to NVIDIA RTX 4060 Subagent (:9001) |
 | `/tasks` | List subagent execution queue, active task & progress |
 | `/subagent view <#>` | Inspect the complete result and tool calls of a subagent |
 | `/subagent inject <#\|all>`| Inject subagent findings (single or all) into current chat context |
@@ -144,7 +145,7 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/save [name]` | Save conversation session state to disk |
 | `/load <name>` | Restore a previous conversation session |
 | `/permissions auto` | Enable Laya dynamic safety gating (`/noul` P(Safe) ≥ 0.90) |
-| `/brainstorm <idea>` | Autonomous Spec-Driven Loop (Cloud Spec ➔ ROCm Build ➔ Dual Review ➔ Commit) |
+| `/brainstorm <idea>` | Autonomous Spec-Driven Loop (Cloud Spec ➔ ROCm Code ➔ NVIDIA Build Subagent ➔ Dual Review ➔ Commit) |
 | `/search <query>` | Live web search (DuckDuckGo + GitHub) with clean formatted snippets |
 | `/fetch <url>` | Fetch web documentation and distill HTML into clean Markdown |
 | `/diff [n]` | Show file changes from the nth latest turn that edited files (default 1) |

@@ -23,6 +23,10 @@ DEFAULT_CLOUD_MODEL = "gemini-3.8-flash-high"
 DEFAULT_LAYA_ENDPOINT = "http://localhost:8003/v1/systemone"
 DEFAULT_LLAMASHIFT_URL = "http://localhost:8002"
 
+# Local Dynamic Model Profiles for ROCm (Port 9000)
+FAST_GIT_MODEL = "gemma4"      # Gemma 4 26B A4B MoE (~4B active params, ultra-fast git/tools)
+DENSE_CODE_MODEL = "qwen27"    # Qwen 3.8 27B Dense (deep reasoning, architecture, heavy code)
+
 # Endpoints Registry Initial Schema
 DEFAULT_ENDPOINTS = {
     "9000": {

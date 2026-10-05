@@ -57,7 +57,7 @@ class LayaDecisionEngine:
     def _fallback_choice(self, prompt: str, options: List[str]) -> Dict[str, Any]:
         lower = prompt.lower()
         cloud_triggers = ["audit", "security review", "frontier", "compliance", "cross-repo", "formal verify", "pen-test", "gemini"]
-        rocm_triggers = ["architect", "refactor", "system design", "microservice", "large context", "multi-file", "database schema", "class hierarchy", "fix", "test", "implement", "write", "code"]
+        rocm_triggers = ["architect", "refactor", "system design", "microservice", "large context", "multi-file", "database schema", "class hierarchy", "fix", "implement", "write", "code"]
 
         # Port 9001 is dedicated to context compaction & memory synthesis.
         # Primary tasks are routed between ROCm (Port 9000, 32GB AMD GPU) and Cloud (Gemini).
@@ -147,3 +147,107 @@ class LayaDecisionEngine:
         probs = res.get("probabilities", {})
         conf = probs.get(winner, 0.75)
         return winner, conf
+
+    def is_git_action(self, prompt: str) -> tuple[bool, float]:
+        """
+        Uses Laya's 'noul' primitive or fast calibrated heuristic to detect
+        if the prompt is primarily a git or version-control operation.
+        Returns: (is_git, confidence)
+        """
+        lower = prompt.lower().strip()
+
+        # Instant check for explicit git commands or workflows
+        git_exact_triggers = [
+            "git status", "git diff", "git add", "git commit", "git push", "git pull",
+            "git checkout", "git branch", "git merge", "git rebase", "git stash",
+            "git reset", "git revert", "git log", "git show", "git tag", "git remote",
+            "git clone", "git fetch", "git cherry-pick", "git blame", "git restore",
+            "git switch", "git config"
+        ]
+        if any(trig in lower for trig in git_exact_triggers) or lower.startswith("git ") or lower == "git":
+            return True, 0.99
+
+        # Semantic keywords & natural language git actions
+        git_semantic_triggers = [
+            "commit changes", "commit with message", "make a commit", "commit and push",
+            "push to origin", "push to main", "push changes", "push branch", "pull request",
+            "stage changes", "stage all", "unstaged changes", "git diff", "show diff",
+            "check the diff", "create a branch", "new branch", "checkout branch",
+            "stash changes", "pop stash", "apply stash", "resolve merge conflict",
+            "merge branch", "rebase on", "check git status", "repo status",
+            "what changed in git", "uncommitted changes", "view git log", "recent commits",
+            "tag release", "git sync", "sync with remote", "revert commit"
+        ]
+        for trig in git_semantic_triggers:
+            if trig in lower:
+                return True, 0.95
+
+        # Query Laya noul if endpoint online
+        if self._online:
+            p_git = self.query_noul(
+                state=prompt[:300],
+                proposition="User is requesting a git or version control operation such as commit, push, diff, branch, or status",
+            )
+            return (p_git >= 0.75), p_git
+
+        return False, 0.05
+
+    def is_heavy_reasoning(self, prompt: str) -> tuple[bool, float]:
+        """
+        Uses Laya's 'noul' primitive or fast calibrated heuristic to detect
+        if the prompt requires deep architectural reasoning, multi-file code synthesis,
+        or complex algorithmic refactoring best suited for Qwen 27B Dense.
+        Returns: (is_heavy, confidence)
+        """
+        lower = prompt.lower()
+        heavy_triggers = [
+            "architect", "system design", "microservice", "class hierarchy",
+            "formal verify", "database schema", "refactor whole", "multi-file",
+            "redesign", "deep reasoning", "algorithm design", "design pattern",
+            "domain-driven", "concurrency model", "memory leak analysis",
+            "ast parser", "type system implementation"
+        ]
+        matches = sum(1 for kw in heavy_triggers if kw in lower)
+        if matches > 0 or len(prompt.split()) > 80:
+            return True, min(0.70 + 0.15 * matches, 0.98)
+
+        if self._online:
+            p_heavy = self.query_noul(
+                state=prompt[:300],
+                proposition="Request requires heavy architectural software design, multi-file refactoring, or complex algorithmic reasoning",
+            )
+            return (p_heavy >= 0.70), p_heavy
+
+        return False, 0.20
+
+    def is_build_action(self, prompt: str) -> tuple[bool, float]:
+        """
+        Uses Laya's 'noul' primitive or fast calibrated heuristic to detect
+        if the prompt is primarily a build, compilation, or test verification task
+        that should be pushed to the dedicated NVIDIA Subagent (Port 9001).
+        Returns: (is_build, confidence)
+        """
+        lower = prompt.lower().strip()
+        build_exact_triggers = [
+            "run build", "build project", "build the project", "npm run build", "pnpm build",
+            "cargo build", "cargo test", "npm test", "pnpm test", "pytest", "make test",
+            "make build", "compile", "run tests", "run test suite", "check build", "verify build",
+            "build and test", "test build", "check compilation", "does it build", "run linter",
+            "flake8", "mypy", "tsc", "mvn package", "gradle build", "test the project",
+            "run the tests", "execute tests", "execute build", "test suite"
+        ]
+        if any(trig in lower for trig in build_exact_triggers) or lower.startswith(("npm test", "pytest", "cargo test", "cargo build", "pnpm test", "make ")):
+            return True, 0.98
+
+        build_keywords = ["build", "compile", "run test", "run tests", "unit test", "test suite", "test runner"]
+        if any(kw in lower for kw in build_keywords) and not any(kw in lower for kw in ["architect", "design", "refactor whole", "implement feature"]):
+            return True, 0.85
+
+        if self._online:
+            p_build = self.query_noul(
+                state=prompt[:300],
+                proposition="User is requesting a project build, compilation, or test verification task",
+            )
+            return (p_build >= 0.75), p_build
+
+        return False, 0.05

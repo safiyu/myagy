@@ -6,8 +6,16 @@ import json
 import time
 import asyncio
 import urllib.request
+import copyreg
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+
+# Prevent deepcopy/pickle crashes when asyncio Tasks or sessions are referenced during config copying
+try:
+    import _asyncio
+    copyreg.pickle(_asyncio.Task, lambda t: (lambda: None, ()))
+except Exception:
+    pass
 
 from google.antigravity import (
     Agent,
@@ -35,6 +43,8 @@ from ..config import (
     DEFAULT_ENDPOINTS,
     DEFAULT_CLOUD_MODEL,
     DEFAULT_LAYA_ENDPOINT,
+    FAST_GIT_MODEL,
+    DENSE_CODE_MODEL,
 )
 from ..terminal.ui import UI, RICH_AVAILABLE, console, StreamRenderer
 from ..terminal.esc_listener import prompt_input
@@ -58,6 +68,10 @@ from ..context.hooks_loader import ExternalHooksManager
 
 class MultiGpuHybridSession:
     """Manages conversations and routing across dual local GPUs (ROCm & CUDA) and Cloud."""
+
+    def __deepcopy__(self, memo):
+        # Preserve session singleton identity and prevent deepcopy recursion into asyncio Tasks/queues
+        return self
 
     def __init__(
         self,
@@ -133,6 +147,11 @@ class MultiGpuHybridSession:
         # Working-tree checkpoints per turn for /diff and /undo
         self.checkpoints: List[Dict[str, Any]] = []
         self._repo_root: Optional[str] = None
+
+        # Dynamic Auto-Shift (Git Actions ➔ Gemma 4 MoE, Deep Reasoning ➔ Qwen 27B Dense)
+        self.auto_git_shift: bool = True
+        self.fast_git_model: str = FAST_GIT_MODEL
+        self.dense_code_model: str = DENSE_CODE_MODEL
 
         # NVIDIA RTX 4060 (:9001) Background Context Curator Cache
         self._cached_curated_memory: Optional[Dict[str, Any]] = None
@@ -287,8 +306,16 @@ class MultiGpuHybridSession:
 
     # ── Subagent Delegation & AST Repo Map ─────────────────────────────
 
-    def spawn_subagent(self, task_description: str) -> SubagentTask:
-        return SubagentManager.spawn(task_description, self)
+    def spawn_subagent(self, task_description: str, command: Optional[str] = None) -> SubagentTask:
+        return SubagentManager.spawn(task_description, self, command=command)
+
+    def run_build_subagent(self, custom_cmd: Optional[str] = None, repo_root: str = ".") -> SubagentTask:
+        """Pushes project build & test verification to the dedicated NVIDIA RTX 4060 Subagent (:9001)."""
+        from ..agents.brainstorm import BrainstormWorkflow
+        build_cmd = custom_cmd or BrainstormWorkflow._detect_test_command(repo_root) or "make test"
+        desc = f"Build & Test Verification: execute '{build_cmd}' in {repo_root}"
+        task = self.spawn_subagent(desc, command=build_cmd)
+        return task
 
     def list_subagents(self) -> List[SubagentTask]:
         return SubagentManager.list_tasks()
@@ -855,21 +882,78 @@ class MultiGpuHybridSession:
 
         # Laya System 1 Auto-Routing (~33ms decision pass)
         if target == "auto":
-            routed_id, conf = self.laya.route_prompt(prompt)
-            if routed_id == "cloud":
-                routed_name = f"Google Cloud ({self.cloud_model})"
-            elif routed_id in self.endpoints:
-                ep = self.endpoints[routed_id]
-                fn = ep.get("filename") or ep.get("name_friendly") or "Unknown Model"
-                routed_name = f"{ep['desc']} [{fn}]"
+            # Priority 1: Git and Version Control actions fast-track to local Gemma 4 MoE
+            if self.auto_git_shift:
+                is_git, git_conf = self.laya.is_git_action(prompt)
+                if is_git:
+                    msg = f"\n{UI.LAYA_BOLD}[⚡ Laya System 1 (~33ms): Git Action ➔ AMD ROCm (Gemma 4 A4B Fast MoE) (Confidence: {git_conf * 100:.1f}%)]\033[0m"
+                    if not self.json_output:
+                        print(msg)
+                    else:
+                        print(msg, file=sys.stderr)
+            # Priority 2: Project Build, Compilation & Automated Tests push to NVIDIA Subagent (:9001)
+            if target == "auto":
+                is_build, build_conf = self.laya.is_build_action(prompt)
+                if is_build:
+                    msg = f"\n{UI.LAYA_BOLD}[⚡ Laya System 1 (~33ms): Build & Test Verification ➔ NVIDIA CUDA Subagent (:9001) (Confidence: {build_conf * 100:.1f}%)]\033[0m"
+                    if not self.json_output:
+                        print(msg)
+                    else:
+                        print(msg, file=sys.stderr)
+                    target = "9001"
+
+            if target == "auto":
+                routed_id, conf = self.laya.route_prompt(prompt)
+                if routed_id == "cloud":
+                    routed_name = f"Google Cloud ({self.cloud_model})"
+                elif routed_id in self.endpoints:
+                    ep = self.endpoints[routed_id]
+                    fn = ep.get("filename") or ep.get("name_friendly") or "Unknown Model"
+                    routed_name = f"{ep['desc']} [{fn}]"
+                else:
+                    routed_name = routed_id
+                msg = f"\n{UI.LAYA_BOLD}[⚡ Laya System 1 (~33ms): 'choice' ➔ {routed_name} (Confidence: {conf * 100:.1f}%)]\033[0m"
+                if not self.json_output:
+                    print(msg)
+                else:
+                    print(msg, file=sys.stderr)
+                target = routed_id
+
+        # Dynamic in-GPU Model Hot-Swap on Port 9000 (Gemma 4 A4B ↔ Qwen 27B Dense)
+        if self.auto_git_shift and target in ("9000", "rocm", "local"):
+            is_git, git_conf = self.laya.is_git_action(prompt)
+            ep_9000 = self.endpoints.get("9000", {})
+            curr_id = (ep_9000.get("id") or "").lower()
+            curr_fn = (ep_9000.get("filename") or "").lower()
+            curr_name = (ep_9000.get("name_friendly") or "").lower()
+
+            if is_git:
+                is_gemma_active = ("gemma" in curr_id or "gemma" in curr_fn or "gemma" in curr_name)
+                if not is_gemma_active:
+                    shift_msg = f"\n{UI.LAYA_BOLD}[⚡ Laya Auto-Shift (~33ms)]{UI.RST} {UI.WHITE}Git action detected (P={git_conf*100:.1f}%) ➔ Hot-swapping to Gemma 4 A4B for rapid execution...{UI.RST}"
+                    if not self.json_output:
+                        print(shift_msg)
+                    else:
+                        print(shift_msg, file=sys.stderr)
+                    swapped = await self.switch_model(self.fast_git_model)
+                    if swapped:
+                        await asyncio.to_thread(self.refresh_endpoints)
             else:
-                routed_name = routed_id
-            msg = f"\n{UI.LAYA_BOLD}[⚡ Laya System 1 (~33ms): 'choice' ➔ {routed_name} (Confidence: {conf * 100:.1f}%)]\033[0m"
-            if not self.json_output:
-                print(msg)
-            else:
-                print(msg, file=sys.stderr)
-            target = routed_id
+                is_heavy, heavy_conf = self.laya.is_heavy_reasoning(prompt)
+                if is_heavy:
+                    is_qwen_active = ("qwen" in curr_id or "qwen" in curr_fn or "qwen" in curr_name)
+                    if not is_qwen_active:
+                        catalog = self.get_catalog()
+                        has_dense = any(self.dense_code_model.lower() in m.get("id", "").lower() for m in catalog)
+                        if has_dense:
+                            shift_msg = f"\n{UI.LAYA_BOLD}[⚡ Laya Auto-Shift (~33ms)]{UI.RST} {UI.WHITE}Deep reasoning task detected (P={heavy_conf*100:.1f}%) ➔ Hot-swapping to Qwen 27B Dense...{UI.RST}"
+                            if not self.json_output:
+                                print(shift_msg)
+                            else:
+                                print(shift_msg, file=sys.stderr)
+                            swapped = await self.switch_model(self.dense_code_model)
+                            if swapped:
+                                await asyncio.to_thread(self.refresh_endpoints)
 
         initial_target = target
 
@@ -1285,6 +1369,10 @@ class MultiGpuHybridSession:
             except Exception:
                 pass
 
+    async def chat_turn(self, prompt: str, target: Optional[str] = None):
+        """Convenience alias for chat() with explicit target routing."""
+        return await self.chat(prompt, force_target=target)
+
     async def close(self):
         if self.history:
             try:
@@ -1364,6 +1452,8 @@ class MultiGpuHybridSession:
             table.add_row("Cloud Auth", Text.from_ansi(auth_status))
             table.add_row("Multi-line Input", Text.from_ansi(ml_status))
             table.add_row("Conversation Turns", Text.from_ansi(f"{UI.CYAN}{len(self.history) // 2}{UI.RST}"))
+            shift_tag = f"{UI.GREEN}Active (Git ➔ Gemma 4 A4B │ Deep ➔ Qwen 27B){UI.RST}" if self.auto_git_shift else f"{UI.GRAY}Disabled{UI.RST}"
+            table.add_row("Auto Model Shift", Text.from_ansi(shift_tag))
             console.print()
             console.print(table)
             console.print()
@@ -1384,6 +1474,8 @@ class MultiGpuHybridSession:
         hook_entries, hook_files = ExternalHooksManager.load_hook_configs(".")
         hook_tag = f"{UI.GREEN}Active ({len(hook_entries)} hooks loaded from {', '.join(hook_files)}){UI.RST}" if hook_entries else (f"{UI.GREEN}Active (Scanning hooks.json){UI.RST}" if self.enable_hooks else f"{UI.GRAY}Disabled{UI.RST}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Lifecycle Hooks{UI.RST}     : {hook_tag}")
+        shift_tag_text = f"{UI.GREEN}Active (Git ➔ Gemma 4 A4B │ Deep ➔ Qwen 27B){UI.RST}" if self.auto_git_shift else f"{UI.GRAY}Disabled{UI.RST}"
+        print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Auto Model Shift{UI.RST}    : {shift_tag_text}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Cloud Model{UI.RST}         : {UI.CLOUD}{self.cloud_model}{UI.RST}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Cloud Auth{UI.RST}          : {auth_status}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Multi-line Input{UI.RST}    : {ml_status}")
@@ -1712,6 +1804,7 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/9001{r} or {c}/cuda{r}       : NVIDIA CUDA RTX 4060 (Port 9001)")
         print(f"{g}│{r}   {c}/cloud{r}              : Google Gemini (uses your OAuth token)")
         print(f"{g}│{r}   {c}/mode <target>{r}      : Switch target by alias, model ID, or number")
+        print(f"{g}│{r}   {c}/git-shift [on|off]{r} : Auto-swap to Gemma 4 A4B for git actions & Qwen 27B for deep code")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}One-Shot Prefixes:{r}")
         print(f"{g}│{r}   {c}@<model_id> <prompt>{r} : Route prompt to any model (auto hot-swaps if inactive)")
@@ -1743,6 +1836,7 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Subagent Delegation & Codebase Map:{r}")
         print(f"{g}│{r}   {c}/spawn <task>{r}         : Delegate background task to NVIDIA RTX 4060 (compactor yields)")
+        print(f"{g}│{r}   {c}/build [cmd]{r}          : Push project build & test verification to NVIDIA RTX 4060 Subagent (:9001)")
         print(f"{g}│{r}   {c}/tasks{r}                : List active and completed background subagents")
         print(f"{g}│{r}   {c}/subagent view <#>{r}    : View full output and tool steps of subagent #")
         print(f"{g}│{r}   {c}/subagent inject <#>{r}  : Inject subagent findings into current conversation context")
@@ -1752,7 +1846,7 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/instructions [view]{r}   : Inspect or toggle auto-injected GEMINI.md / antigravity.md")
         print(f"{g}│{r}   {c}/hooks [view|refresh]{r}  : Inspect, reload or toggle lifecycle hooks (hooks.json)")
         print(f"{g}│{r} {UI.BOLD}Autonomous Spec-Driven Workflow:{r}")
-        print(f"{g}│{r}   {c}/brainstorm <idea>{r}    : Full Cloud Spec ➔ Approval ➔ ROCm Build ➔ Dual Review ➔ Commit")
+        print(f"{g}│{r}   {c}/brainstorm <idea>{r}    : Full Cloud Spec ➔ Approval ➔ ROCm Code ➔ NVIDIA Build Subagent ➔ Dual Review ➔ Commit")
         print(f"{g}│{r}")
         print(f"{g}│{r} {UI.BOLD}Web Search & Live Documentation:{r}")
         print(f"{g}│{r}   {c}/search <query>{r}       : Live web search (DuckDuckGo + GitHub) with clean snippets")

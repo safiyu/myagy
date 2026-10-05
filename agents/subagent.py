@@ -5,6 +5,7 @@ strictly 1-at-a-time on the NVIDIA RTX 4060 accelerator to honor VRAM and comput
 
 import time
 import json
+import re
 import asyncio
 import urllib.request
 from typing import Optional, List, Dict, Any
@@ -27,9 +28,13 @@ from ..core.llamashift import trigger_llamashift_switch
 class SubagentTask:
     """Represents an asynchronous background engineering task delegated to the NVIDIA accelerator."""
 
-    def __init__(self, task_id: int, description: str):
+    def __deepcopy__(self, memo):
+        return self
+
+    def __init__(self, task_id: int, description: str, command: Optional[str] = None):
         self.id = task_id
         self.description = description
+        self.command = command
         self.status = "queued"  # queued | running | completed | failed | cancelled
         self.created_at = time.time()
         self.started_at: Optional[float] = None
@@ -99,14 +104,14 @@ class SubagentManager:
         }
 
     @classmethod
-    def spawn(cls, description: str, session: Any) -> SubagentTask:
+    def spawn(cls, description: str, session: Any, command: Optional[str] = None) -> SubagentTask:
         """
         Enqueues a subagent task. If the NVIDIA GPU is currently idle, it begins executing immediately.
         If a task is already running, this task queues in FIFO order, guaranteeing strict 1-at-a-time execution.
         """
         cls._ensure_queue_init(session)
 
-        task = SubagentTask(task_id=cls._next_id, description=description)
+        task = SubagentTask(task_id=cls._next_id, description=description, command=command)
         cls._next_id += 1
         cls._tasks.append(task)
 
@@ -337,17 +342,84 @@ class SubagentManager:
                 raise RuntimeError("NVIDIA RTX 4060 (Port 9001) is offline. Start it via llama-launcher or /compactor start.")
 
             res_text = None
-            try:
-                res_text = await asyncio.wait_for(cls._run_with_tools(task, session, ep9001), timeout=cls.TOOL_RUN_TIMEOUT)
-                task.mode = "tools"
-            except asyncio.CancelledError:
-                raise
-            except Exception as tool_err:
-                task.tool_calls.append({"name": "(tool agent unavailable, using plain completion)", "args": {"error": str(tool_err)[:200]}, "timestamp": time.time()})
+            # Check if this task involves running a build or shell command
+            shell_cmd = task.command
+            if not shell_cmd:
+                cmd_match = re.search(r"execute ['\"]([^'\"]+)['\"]", task.description, re.IGNORECASE)
+                if cmd_match:
+                    shell_cmd = cmd_match.group(1)
 
-            if not res_text:
-                res_text = await cls._run_plain(task, ep9001)
-                task.mode = "no-tools"
+            if shell_cmd:
+                task.tool_calls.append({
+                    "name": "run_command",
+                    "args": {"CommandLine": shell_cmd},
+                    "timestamp": time.time(),
+                })
+                try:
+                    proc = await asyncio.create_subprocess_shell(
+                        shell_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await proc.communicate()
+                    return_code = proc.returncode
+                    cmd_output = (stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")).strip()
+                except Exception as ex:
+                    return_code = 1
+                    cmd_output = f"Execution error: {ex}"
+
+                subagent_instructions = (
+                    "You are an expert autonomous sub-agent running on the NVIDIA RTX 4060 accelerator.\n"
+                    "Your objective is to analyze the build and test execution results:\n\n"
+                    f"TASK: {task.description}\n"
+                    f"COMMAND: `{shell_cmd}`\n"
+                    f"EXIT CODE: {return_code}\n"
+                    f"OUTPUT SNIPPET:\n{cmd_output[-3000:]}\n\n"
+                    "OPERATIONAL GUIDELINES:\n"
+                    "1. Direct execution analysis: State clearly whether the build/test PASSED or FAILED.\n"
+                    "2. If FAILED, provide exact root cause analysis, failing test names, compiler errors, and recommended code fixes.\n"
+                    "3. Conclude with a dense, structured, factual summary."
+                )
+                user_msg = f"Analyze build/test execution for `{shell_cmd}` (exit code {return_code}). Output summary and diagnostics."
+
+                payload = {
+                    "model": ep9001.get("filename") or "granite-4.2-8b",
+                    "messages": [
+                        {"role": "system", "content": subagent_instructions},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "max_tokens": 1500,
+                    "temperature": 0.2,
+                }
+                req_data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    "http://127.0.0.1:9001/v1/chat/completions",
+                    data=req_data,
+                    headers={"Content-Type": "application/json"},
+                )
+
+                def _call_http():
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                data = await asyncio.to_thread(_call_http)
+                choice = data["choices"][0]["message"]
+                res_text = (choice.get("content") or choice.get("reasoning_content") or "").strip()
+                if not res_text and choice.get("reasoning_content"):
+                    res_text = choice.get("reasoning_content").strip()
+                task.mode = "tools"
+            else:
+                try:
+                    res_text = await asyncio.wait_for(cls._run_with_tools(task, session, ep9001), timeout=cls.TOOL_RUN_TIMEOUT)
+                    task.mode = "tools"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as tool_err:
+                    task.tool_calls.append({"name": "(tool agent unavailable, using plain completion)", "args": {"error": str(tool_err)[:200]}, "timestamp": time.time()})
+
+                if not res_text:
+                    res_text = await cls._run_plain(task, ep9001)
+                    task.mode = "no-tools"
 
             if res_text:
                 task.result = res_text
