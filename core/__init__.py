@@ -2,6 +2,7 @@
 
 from .coordinator import CudaCoordinator
 from .laya import LayaDecisionEngine
+from .sudo_manager import SudoManager
 from .llamashift import (
     detect_port_model,
     query_endpoint_model,
@@ -23,6 +24,7 @@ __all__ = [
     "MultiGpuHybridSession",
     "CudaCoordinator",
     "LayaDecisionEngine",
+    "SudoManager",
     "detect_port_model",
     "query_endpoint_model",
     "trigger_llamashift_switch",

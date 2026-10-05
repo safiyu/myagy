@@ -1,0 +1,250 @@
+"""
+Sudo Privilege Elevation & Askpass Management:
+Enables seamless execution of administrative/root commands inside Multi-GPU sessions,
+subagents, and direct terminal executions with interactive password entry and secure caching.
+"""
+
+import os
+import sys
+import re
+import time
+import atexit
+import shutil
+import getpass
+import tempfile
+import subprocess
+from typing import Optional, Tuple
+
+from ..terminal.ui import UI
+
+
+class SudoManager:
+    """
+    Manages session-level sudo privilege elevation, secure askpass helpers,
+    and interactive password verification for autonomous agent tool execution.
+    """
+
+    _password: Optional[str] = None
+    _authenticated_at: Optional[float] = None
+    _timeout_seconds: float = 900.0  # 15 minutes default timeout
+    _runtime_dir: Optional[str] = None
+    _pass_file: Optional[str] = None
+    _askpass_file: Optional[str] = None
+    _shim_file: Optional[str] = None
+    _initialized: bool = False
+
+    @classmethod
+    def _ensure_initialized(cls):
+        """Prepares private runtime directory, askpass script, and sudo shim."""
+        if cls._initialized and cls._runtime_dir and os.path.exists(cls._runtime_dir):
+            return
+
+        runtime_dir = tempfile.mkdtemp(prefix="myagy_sudo_")
+        os.chmod(runtime_dir, 0o700)
+        cls._runtime_dir = runtime_dir
+
+        cls._pass_file = os.path.join(runtime_dir, ".sudo_secret")
+        # Touch file with restrictive permissions
+        with open(cls._pass_file, "w", encoding="utf-8") as f:
+            f.write("")
+        os.chmod(cls._pass_file, 0o600)
+
+        # 1. Askpass script: reads from the secure token file
+        cls._askpass_file = os.path.join(runtime_dir, "myagy_askpass.sh")
+        with open(cls._askpass_file, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/sh\n"
+                f'if [ -f "{cls._pass_file}" ]; then\n'
+                f'    cat "{cls._pass_file}"\n'
+                "fi\n"
+            )
+        os.chmod(cls._askpass_file, 0o700)
+
+        # 2. Transparent Sudo shim: intercepts sudo calls and routes to -A with SUDO_ASKPASS
+        cls._shim_file = os.path.join(runtime_dir, "sudo")
+        with open(cls._shim_file, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/bash\n"
+                'REAL_SUDO="/usr/bin/sudo"\n'
+                'if [ -n "$SUDO_ASKPASS" ] && [ -x "$SUDO_ASKPASS" ]; then\n'
+                '    exec "$REAL_SUDO" -A "$@"\n'
+                "else\n"
+                '    exec "$REAL_SUDO" "$@"\n'
+                "fi\n"
+            )
+        os.chmod(cls._shim_file, 0o700)
+
+        # Export into process environment so children inherit seamlessly
+        cur_path = os.environ.get("PATH", "")
+        if not cur_path.startswith(runtime_dir):
+            os.environ["PATH"] = f"{runtime_dir}:{cur_path}"
+        os.environ["SUDO_ASKPASS"] = cls._askpass_file
+
+        atexit.register(cls.cleanup)
+        cls._initialized = True
+
+    @classmethod
+    def cleanup(cls):
+        """Wipes the cached password file and resets system sudo credentials."""
+        try:
+            if cls._pass_file and os.path.exists(cls._pass_file):
+                with open(cls._pass_file, "w", encoding="utf-8") as f:
+                    f.write("\x00" * 64)
+                os.remove(cls._pass_file)
+        except Exception:
+            pass
+
+        cls._password = None
+        cls._authenticated_at = None
+
+        try:
+            if cls._runtime_dir and os.path.exists(cls._runtime_dir):
+                shutil.rmtree(cls._runtime_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        cls._initialized = False
+
+        # Reset host kernel sudo timestamp cache
+        try:
+            subprocess.run(["/usr/bin/sudo", "-k"], capture_output=True, timeout=2)
+        except Exception:
+            pass
+
+    @classmethod
+    def is_authenticated(cls) -> bool:
+        """Returns True if a valid sudo password is currently cached and within timeout."""
+        if not cls._password or cls._authenticated_at is None:
+            return False
+        if (time.time() - cls._authenticated_at) > cls._timeout_seconds:
+            cls.clear_credentials()
+            return False
+        return True
+
+    @classmethod
+    def time_remaining(cls) -> float:
+        """Returns remaining seconds for cached sudo credentials, or 0.0 if expired."""
+        if not cls.is_authenticated():
+            return 0.0
+        elapsed = time.time() - cls._authenticated_at
+        return max(0.0, cls._timeout_seconds - elapsed)
+
+    @classmethod
+    def set_password(cls, password: str):
+        """Stores password in volatile memory and the private askpass file."""
+        cls._ensure_initialized()
+        cleaned_pass = password.strip("\r\n")
+        cls._password = cleaned_pass
+        cls._authenticated_at = time.time()
+
+        if cls._pass_file:
+            with open(cls._pass_file, "w", encoding="utf-8") as f:
+                f.write(cleaned_pass + "\n")
+            os.chmod(cls._pass_file, 0o600)
+
+        # Refresh sudo timestamp cache
+        try:
+            subprocess.run(
+                ["/usr/bin/sudo", "-S", "-v"],
+                input=(cleaned_pass + "\n").encode("utf-8"),
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+    @classmethod
+    def clear_credentials(cls):
+        """Clears cached credentials and resets sudo state."""
+        cls._password = None
+        cls._authenticated_at = None
+        if cls._pass_file and os.path.exists(cls._pass_file):
+            try:
+                with open(cls._pass_file, "w", encoding="utf-8") as f:
+                    f.write("")
+            except Exception:
+                pass
+        try:
+            subprocess.run(["/usr/bin/sudo", "-k"], capture_output=True, timeout=2)
+        except Exception:
+            pass
+
+    @classmethod
+    def verify_and_authenticate(cls, password: str) -> Tuple[bool, str]:
+        """Validates password against sudo -S -v and caches upon success."""
+        cls._ensure_initialized()
+        cleaned_pass = password.strip("\r\n")
+        if not cleaned_pass:
+            return False, "Password cannot be empty."
+
+        try:
+            proc = subprocess.run(
+                ["/usr/bin/sudo", "-S", "-v"],
+                input=(cleaned_pass + "\n").encode("utf-8"),
+                capture_output=True,
+                timeout=8,
+            )
+            if proc.returncode == 0:
+                cls.set_password(cleaned_pass)
+                return True, "Sudo access authenticated successfully."
+            err = proc.stderr.decode("utf-8", errors="replace").strip()
+            return False, err or "Incorrect sudo password."
+        except subprocess.TimeoutExpired:
+            return False, "Sudo authentication check timed out."
+        except Exception as ex:
+            return False, f"Sudo verification error: {ex}"
+
+    @classmethod
+    def prompt_password_entry(cls, reason: Optional[str] = None, max_attempts: int = 3) -> bool:
+        """
+        Interactive password entry section with masked input, validation,
+        and clean visual feedback.
+        """
+        user = os.environ.get("USER", "root")
+        print(f"\n{UI.AMBER_BOLD}╭──────────────── 🛡️  SUDO PRIVILEGE AUTHENTICATION ────────────────╮{UI.RST}")
+        print(f"{UI.AMBER_BOLD}│{UI.RST}  User        : {UI.WHITE}{user}{UI.RST}")
+        if reason:
+            short_reason = reason.strip().replace("\n", " ")
+            if len(short_reason) > 60:
+                short_reason = short_reason[:57] + "..."
+            print(f"{UI.AMBER_BOLD}│{UI.RST}  Requested   : {UI.CYAN}{short_reason}{UI.RST}")
+        print(f"{UI.AMBER_BOLD}│{UI.RST}  Duration    : 15 minutes session cache (revoke via /sudo clear)")
+        print(f"{UI.AMBER_BOLD}╰────────────────────────────────────────────────────────────────────╯{UI.RST}")
+
+        for attempt in range(max_attempts):
+            try:
+                prompt_label = f"{UI.AMBER_BOLD}[sudo] password for {user}: {UI.RST}"
+                # Attempt getpass for secure hidden entry
+                try:
+                    pw = getpass.getpass(prompt_label)
+                except (termios_error if "termios_error" in globals() else Exception):
+                    from .esc_listener import prompt_input
+                    pw = prompt_input(prompt_label)
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n{UI.RED}[x] Password entry cancelled.{UI.RST}\n")
+                return False
+
+            if not pw or not pw.strip():
+                print(f"{UI.RED}[x] Empty password provided. Entry aborted.{UI.RST}\n")
+                return False
+
+            ok, msg = cls.verify_and_authenticate(pw)
+            if ok:
+                print(f"{UI.GREEN_BOLD}[✓] Sudo access authenticated and unlocked for 15 minutes.{UI.RST}\n")
+                return True
+            else:
+                rem = max_attempts - attempt - 1
+                if rem > 0:
+                    print(f"{UI.RED_BOLD}[x] {msg} ({rem} attempt(s) remaining){UI.RST}")
+                else:
+                    print(f"{UI.RED_BOLD}[x] Sudo authentication failed: maximum attempts exceeded.{UI.RST}\n")
+
+        return False
+
+    @classmethod
+    def is_sudo_command(cls, cmd: str) -> bool:
+        """Determines if a command line string requires root / sudo elevation."""
+        if not cmd or not isinstance(cmd, str):
+            return False
+        pattern = r'(^|[;&|]|\bdo\b|\bthen\b)\s*(?:/usr/bin/)?sudo\b'
+        return bool(re.search(pattern, cmd.strip()))

@@ -145,6 +145,8 @@ python3 /home/safiyu/Projects/myagy/antigravity_agent.py --dangerously-skip-perm
 | `/save [name]` | Save conversation session state to disk |
 | `/load <name>` | Restore a previous conversation session |
 | `/permissions auto` | Enable Laya dynamic safety gating (`/noul` P(Safe) ≥ 0.90) |
+| `/sudo [cmd]` | Manage cached root credentials, password entry, or run command with sudo |
+| `!<command>` | Directly execute shell command in host terminal with sudo askpass support |
 | `/brainstorm <idea>` | Autonomous Spec-Driven Loop (Cloud Spec ➔ ROCm Code ➔ NVIDIA Build Subagent ➔ Dual Review ➔ Commit) |
 | `/search <query>` | Live web search (DuckDuckGo + GitHub) with clean formatted snippets |
 | `/fetch <url>` | Fetch web documentation and distill HTML into clean Markdown |

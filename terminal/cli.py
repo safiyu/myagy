@@ -7,6 +7,7 @@ import signal
 import select
 import asyncio
 import argparse
+import subprocess
 from typing import Optional
 
 try:
@@ -26,6 +27,7 @@ from ..core.prefs import PREF_DEFAULTS, load_prefs, reset_prefs
 from ..core.llamashift import trigger_llamashift_switch
 from ..context.mcp_loader import load_mcp_servers, McpStdioServer
 from ..core.session import MultiGpuHybridSession
+from ..core.sudo_manager import SudoManager
 from .esc_listener import EscListener, prompt_input
 
 
@@ -34,7 +36,7 @@ SLASH_COMMANDS = [
     "/spawn", "/tasks", "/subagent", "/repomap", "/instructions", "/hooks", "/mcp", "/compact",
     "/autocompact", "/compactor", "/curation", "/context", "/ctx", "/save", "/load", "/sessions",
     "/export", "/summarize", "/history", "/clear", "/status", "/metrics", "/verbose", "/steps",
-    "/permissions", "/laya", "/json", "/format", "/multiline", "/singleline", "/paste", "/reload",
+    "/permissions", "/sudo", "/laya", "/json", "/format", "/multiline", "/singleline", "/paste", "/reload",
     "/brainstorm", "/search", "/fetch", "/diff", "/undo", "/stats", "/prefs", "/markdown", "/help",
 ]
 AT_TARGETS = ["@rocm", "@cuda", "@cloud", "@auto", "@local", "@9000", "@9001"]
@@ -275,6 +277,30 @@ async def interactive_loop(session: MultiGpuHybridSession):
                     continue
                 user_input = pasted_text
 
+            # Direct shell command execution with '!' prefix
+            if user_input.startswith("!"):
+                raw_cmd = user_input[1:].strip()
+                if not raw_cmd:
+                    print(UI.warn("Usage: !<shell command>"))
+                    continue
+
+                is_sudo = SudoManager.is_sudo_command(raw_cmd)
+                if is_sudo and not SudoManager.is_authenticated():
+                    if not SudoManager.prompt_password_entry(reason=raw_cmd):
+                        print(UI.warn("Execution aborted: sudo authentication required."))
+                        continue
+
+                try:
+                    print(f"{UI.GRAY}$ {raw_cmd}{UI.RST}\n")
+                    proc = await asyncio.to_thread(subprocess.run, raw_cmd, shell=True, env=os.environ)
+                    if proc.returncode != 0:
+                        print(f"\n{UI.RED_BOLD}[Exit {proc.returncode}]{UI.RST}\n")
+                    else:
+                        print()
+                except Exception as ex:
+                    print(UI.err(f"Shell execution failed: {ex}"))
+                continue
+
             # Handle slash commands
             if user_input.startswith("/"):
                 parts = user_input.split(maxsplit=1)
@@ -329,6 +355,43 @@ async def interactive_loop(session: MultiGpuHybridSession):
                         print(UI.ok("Permissions: SAFE MODE"))
                     else:
                         print(UI.warn("Usage: /permissions auto | skip | safe"))
+                elif cmd == "/sudo":
+                    arg_strip = arg.strip()
+                    if not arg_strip:
+                        if SudoManager.is_authenticated():
+                            rem = int(SudoManager.time_remaining() // 60)
+                            print(f"\n{UI.GREEN_BOLD}[✓] Sudo access is currently ACTIVE (~{rem}m remaining in session cache).{UI.RST}")
+                            print(f"{UI.DARK_GRAY}Tip: Use '/sudo clear' to revoke or '/sudo <command>' to execute with root privileges.{UI.RST}\n")
+                        else:
+                            SudoManager.prompt_password_entry()
+                    elif arg_strip in ("status", "check"):
+                        if SudoManager.is_authenticated():
+                            rem = int(SudoManager.time_remaining() // 60)
+                            print(f"\n{UI.GREEN_BOLD}[✓] Sudo Status: ACTIVE (~{rem} minutes remaining in session){UI.RST}")
+                            print(f"{UI.DARK_GRAY}User: {os.environ.get('USER', 'root')} │ Timeout: 15 min │ Askpass: Active{UI.RST}\n")
+                        else:
+                            print(f"\n{UI.AMBER_BOLD}[○] Sudo Status: INACTIVE (No cached credentials){UI.RST}")
+                            print(f"{UI.DARK_GRAY}Type '/sudo' to authenticate and unlock root access.{UI.RST}\n")
+                    elif arg_strip in ("clear", "lock", "reset", "revoke"):
+                        SudoManager.clear_credentials()
+                        print(f"\n{UI.ok('Sudo credentials cleared. Root access revoked.')}\n")
+                    else:
+                        subcmd = arg_strip
+                        if not subcmd.startswith("sudo "):
+                            subcmd = f"sudo {subcmd}"
+                        print(f"{UI.GRAY}⚡ Executing: {UI.WHITE}{subcmd}{UI.RST}\n")
+                        if not SudoManager.is_authenticated():
+                            if not SudoManager.prompt_password_entry(reason=subcmd):
+                                print(UI.warn("Execution aborted: sudo authentication required."))
+                                continue
+                        try:
+                            proc = await asyncio.to_thread(subprocess.run, subcmd, shell=True, env=os.environ)
+                            if proc.returncode == 0:
+                                print(f"\n{UI.GREEN_BOLD}[✓] Command completed cleanly (exit code 0).{UI.RST}\n")
+                            else:
+                                print(f"\n{UI.RED_BOLD}[x] Command exited with code {proc.returncode}.{UI.RST}\n")
+                        except Exception as ex:
+                            print(UI.err(f"Execution failed: {ex}"))
                 elif cmd in ("/git-shift", "/gitshift", "/autoshift"):
                     arg_low = arg.lower().strip()
                     if arg_low in ("on", "true", "1", "enable"):

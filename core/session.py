@@ -64,6 +64,7 @@ from ..agents.subagent import SubagentManager, SubagentTask
 from ..context.repomap import RepoMap
 from ..context.instructions import ProjectInstructions
 from ..context.hooks_loader import ExternalHooksManager
+from .sudo_manager import SudoManager
 
 
 class MultiGpuHybridSession:
@@ -235,6 +236,61 @@ class MultiGpuHybridSession:
 
     def permission_prompt_handler(self, tool: Any, args: Dict[str, Any]) -> bool:
         tool_name = getattr(tool, "name", str(tool))
+        cmd_line = args.get("CommandLine", "") if isinstance(args, dict) else ""
+        is_sudo = (tool_name == "run_command" and SudoManager.is_sudo_command(cmd_line))
+
+        # ── SUDO COMMAND HANDLING & PASSWORD ENTRY SECTION ──
+        if is_sudo:
+            user = os.environ.get("USER", "root")
+            print(f"\n{UI.AMBER_BOLD}╭──────────────── 🛡️  SUDO PRIVILEGE ELEVATION REQUIRED ────────────────╮{UI.RST}")
+            print(f"{UI.AMBER_BOLD}│{UI.RST}  Tool     : {UI.WHITE}{tool_name}{UI.RST} (Administrative / Root Elevation)")
+            print(f"{UI.AMBER_BOLD}│{UI.RST}  Command  : {UI.CYAN}{cmd_line}{UI.RST}")
+            print(f"{UI.AMBER_BOLD}│{UI.RST}  Target   : {UI.WHITE}Host System ({user}){UI.RST}")
+            print(f"{UI.AMBER_BOLD}╰───────────────────────────────────────────────────────────────────────╯{UI.RST}")
+
+            if SudoManager.is_authenticated():
+                rem_min = int(SudoManager.time_remaining() // 60)
+                print(f"{UI.GREEN_BOLD}[🛡️  Sudo credentials active: ~{rem_min}m remaining in session cache]{UI.RST}")
+                try:
+                    choice = prompt_input(f"{UI.AMBER_BOLD}Authorize root execution? [Y/n/change-password]: {UI.RST}").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    print(f"\n{UI.RED_BOLD}[x] Execution denied.{UI.RST}")
+                    return False
+
+                if choice in ("c", "change", "change-password"):
+                    if not SudoManager.prompt_password_entry(reason=cmd_line):
+                        return False
+                    print(f"{UI.GREEN_BOLD}[✓] Root execution approved.{UI.RST}")
+                    return True
+                elif choice in ("", "y", "yes"):
+                    print(f"{UI.GREEN_BOLD}[✓] Root execution approved.{UI.RST}")
+                    return True
+                else:
+                    print(f"{UI.RED_BOLD}[x] Execution denied by user.{UI.RST}")
+                    return False
+            else:
+                try:
+                    choice = prompt_input(f"{UI.AMBER_BOLD}Authorize execution with sudo? [y/N]: {UI.RST}").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    print(f"\n{UI.RED_BOLD}[x] Execution denied.{UI.RST}")
+                    return False
+
+                if choice in ("y", "yes"):
+                    ok = SudoManager.prompt_password_entry(reason=cmd_line)
+                    if ok:
+                        print(f"{UI.GREEN_BOLD}[✓] Root execution approved.{UI.RST}")
+                        return True
+                    else:
+                        print(f"{UI.RED_BOLD}[x] Sudo authorization failed. Execution denied.{UI.RST}")
+                        return False
+                else:
+                    print(f"{UI.RED_BOLD}[x] Execution denied by user.{UI.RST}")
+                    return False
+
+        if self._dangerously_skip_permissions and not self.use_laya_adaptive_permissions:
+            print(f"{UI.AMBER_BOLD}[⚡ Auto-approved '{tool_name}' (skip-permissions mode)]{UI.RST}")
+            return True
+
         action_summary = f"Tool: {tool_name} Args: {json.dumps(args)}"
 
         if self.use_laya_adaptive_permissions:
@@ -265,8 +321,6 @@ class MultiGpuHybridSession:
             return False
 
     def get_policies(self) -> List[Any]:
-        if self._dangerously_skip_permissions and not self.use_laya_adaptive_permissions:
-            return [policy.allow_all()]
         return policy.confirm_run_command(handler=self.permission_prompt_handler)
 
     # ── Context & Synthesis Delegation ─────────────────────────────────
@@ -1385,6 +1439,7 @@ class MultiGpuHybridSession:
             except Exception:
                 pass
             self._active_local_agent = None
+        SudoManager.cleanup()
 
     # ── Status, Catalog & Model Switch UI ─────────────────────────────
 
@@ -1454,6 +1509,8 @@ class MultiGpuHybridSession:
             table.add_row("Conversation Turns", Text.from_ansi(f"{UI.CYAN}{len(self.history) // 2}{UI.RST}"))
             shift_tag = f"{UI.GREEN}Active (Git ➔ Gemma 4 A4B │ Deep ➔ Qwen 27B){UI.RST}" if self.auto_git_shift else f"{UI.GRAY}Disabled{UI.RST}"
             table.add_row("Auto Model Shift", Text.from_ansi(shift_tag))
+            sudo_badge = f"{UI.GREEN}Active (~{int(SudoManager.time_remaining() // 60)}m cached){UI.RST}" if SudoManager.is_authenticated() else f"{UI.GRAY}Inactive (Prompt on demand){UI.RST}"
+            table.add_row("Sudo Privileges", Text.from_ansi(sudo_badge))
             console.print()
             console.print(table)
             console.print()
@@ -1463,6 +1520,8 @@ class MultiGpuHybridSession:
         print(f"{UI.GRAY}╭─── {UI.WHITE}MULTI-GPU HYBRID AGENT STATUS{UI.RST}{UI.GRAY} ──────────────────────────────────────╮{UI.RST}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Active Target{UI.RST}       : {active_label}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Permissions{UI.RST}         : {perm_desc}")
+        sudo_badge_text = f"{UI.GREEN}Active (~{int(SudoManager.time_remaining() // 60)}m cached){UI.RST}" if SudoManager.is_authenticated() else f"{UI.GRAY}Inactive (Prompt on demand){UI.RST}"
+        print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Sudo Privileges{UI.RST}     : {sudo_badge_text}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Laya Decision Engine{UI.RST}: {UI.LAYA}ModernBERT-large (~421M, ~33ms){UI.RST} [/v1/systemone]")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Primary (ROCm :9000){UI.RST} : {m0_str}")
         print(f"{UI.GRAY}│{UI.RST}  {UI.WHITE}Compactor (CUDA :9001){UI.RST}: {m1_str}")
@@ -1867,6 +1926,8 @@ class MultiGpuHybridSession:
         print(f"{g}│{r}   {c}/permissions auto{r}    : Enable Laya Bayesian dynamic gating ('noul')")
         print(f"{g}│{r}   {c}/permissions skip{r}    : Auto-approve all tool execution requests")
         print(f"{g}│{r}   {c}/permissions safe{r}    : Prompt before running any command")
+        print(f"{g}│{r}   {c}/sudo [status|clear|<cmd>]{r}: Sudo credentials management & elevated execution")
+        print(f"{g}│{r}   {c}!<command>{r}                 : Directly execute a shell command in host terminal")
         print(f"{g}│{r}   {c}/steps off|<#>{r}        : Disable or set max tool steps per turn (default: off)")
         print(f"{g}│{r}   {c}/verbose [on|off]{r}     : Toggle full tool arguments & output traces")
         print(f"{g}│{r}   {c}/laya{r}                 : Display Laya System 1 Decision Model details")
