@@ -47,14 +47,25 @@ def load_mcp_servers() -> List[McpStdioServer | McpStreamableHttpServer]:
             with open(MCP_CONFIG_PATH) as f:
                 raw_text = f.read().strip()
                 data = json.loads(raw_text) if raw_text else {}
-            # Antigravity native format: list under "mcpServers"
-            for entry in data.get("mcpServers", []):
-                name = entry.get("name", "")
-                if name and name not in names_seen:
-                    srv = _parse_entry(name, entry)
-                    if srv:
-                        servers.append(srv)
-                        names_seen.add(name)
+            # Antigravity native / Claude format: dict or list under "mcpServers"
+            mcp_servers_raw = data.get("mcpServers")
+            if isinstance(mcp_servers_raw, dict):
+                for name, cfg in mcp_servers_raw.items():
+                    safe_name = name.replace(" ", "_")[:64]
+                    if safe_name not in names_seen:
+                        srv = _parse_entry(safe_name, cfg)
+                        if srv:
+                            servers.append(srv)
+                            names_seen.add(safe_name)
+            elif isinstance(mcp_servers_raw, list):
+                for entry in mcp_servers_raw:
+                    name = entry.get("name", "")
+                    if name and name not in names_seen:
+                        srv = _parse_entry(name, entry)
+                        if srv:
+                            servers.append(srv)
+                            names_seen.add(name)
+
             # VS Code-compatible format: dict under "servers"
             for name, cfg in data.get("servers", {}).items():
                 safe_name = name.replace(" ", "_")[:64]
@@ -66,8 +77,12 @@ def load_mcp_servers() -> List[McpStdioServer | McpStreamableHttpServer]:
         except Exception as e:
             print(UI.warn(f"MCP: could not load {MCP_CONFIG_PATH}: {e}"))
 
-    # Auto-detect local Kontexta MCP server
-    if "kontexta" not in names_seen and os.path.exists(KONTEXTA_MCP_PATH):
+    # Auto-detect local Kontexta MCP server if not already defined
+    has_kontexta = any(
+        s.name in ("kontexta", "kxta") or (hasattr(s, "args") and KONTEXTA_MCP_PATH in (s.args or []))
+        for s in servers
+    )
+    if not has_kontexta and os.path.exists(KONTEXTA_MCP_PATH):
         servers.append(McpStdioServer(
             name="kontexta",
             command="node",
