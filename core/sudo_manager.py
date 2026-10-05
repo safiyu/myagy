@@ -204,9 +204,11 @@ class SudoManager:
         print(f"\n{UI.AMBER_BOLD}╭──────────────── 🛡️  SUDO PRIVILEGE AUTHENTICATION ────────────────╮{UI.RST}")
         print(f"{UI.AMBER_BOLD}│{UI.RST}  User        : {UI.WHITE}{user}{UI.RST}")
         if reason:
-            short_reason = reason.strip().replace("\n", " ")
-            if len(short_reason) > 60:
-                short_reason = short_reason[:57] + "..."
+            short_reason = reason.strip().replace("\r\n", " ").replace("\n", " ")
+            term_cols = shutil.get_terminal_size((100, 24)).columns
+            max_reason = max(80, term_cols - 25)
+            if len(short_reason) > max_reason:
+                short_reason = short_reason[:max_reason - 3] + "..."
             print(f"{UI.AMBER_BOLD}│{UI.RST}  Requested   : {UI.CYAN}{short_reason}{UI.RST}")
         print(f"{UI.AMBER_BOLD}│{UI.RST}  Duration    : 15 minutes session cache (revoke via /sudo clear)")
         print(f"{UI.AMBER_BOLD}╰────────────────────────────────────────────────────────────────────╯{UI.RST}")

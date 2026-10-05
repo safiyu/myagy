@@ -6,6 +6,7 @@ strictly 1-at-a-time on the NVIDIA RTX 4060 accelerator to honor VRAM and comput
 import time
 import json
 import re
+import shutil
 import asyncio
 import urllib.request
 from typing import Optional, List, Dict, Any
@@ -216,6 +217,8 @@ class SubagentManager:
                 cls._active_task = task
                 # Synchronously acquire lock so compactor yields
                 CudaCoordinator.reserve_for_subagent()
+                if cls._session and not getattr(cls._session, "json_output", False):
+                    print(f"\n{UI.CUDA_BOLD}⚡ [Subagent #{task.id} Executing]{UI.RST} {UI.WHITE}{task.description}{UI.RST} {UI.GRAY}(executing on NVIDIA RTX 4060...){UI.RST}\n", flush=True)
 
                 task._async_task = asyncio.create_task(cls._run_worker(task, cls._session))
                 try:
@@ -443,10 +446,13 @@ class SubagentManager:
             if not session.json_output:
                 queued_left = sum(1 for t in cls._tasks if t.status == "queued")
                 queue_suffix = f" {UI.AMBER}({queued_left} next in queue){UI.RST}" if queued_left > 0 else ""
+                term_cols = shutil.get_terminal_size((120, 24)).columns
+                max_desc = max(80, term_cols - 40)
+                desc_str = task.description if len(task.description) <= max_desc else (task.description[:max_desc - 3] + "...")
                 if task.status == "completed":
                     print(
                         f"\n{UI.GREEN_BOLD}✓ [Subagent #{task.id} Completed]{UI.RST} "
-                        f"{UI.WHITE}{task.description[:55]}{UI.RST} "
+                        f"{UI.WHITE}{desc_str}{UI.RST} "
                         f"{UI.GRAY}(in {task.duration:.1f}s via RTX 4060){UI.RST}{queue_suffix}\n"
                         f"{UI.DARK_GRAY}   ➔ Type {UI.CYAN}/subagent view {task.id}{UI.DARK_GRAY} to inspect result or {UI.CYAN}/subagent inject {task.id}{UI.DARK_GRAY} to add to session history.{UI.RST}\n",
                         flush=True,
@@ -454,7 +460,7 @@ class SubagentManager:
                 elif task.status == "failed":
                     print(
                         f"\n{UI.RED_BOLD}✗ [Subagent #{task.id} Failed]{UI.RST} "
-                        f"{UI.WHITE}{task.description[:55]}{UI.RST}: {UI.RED}{task.error}{UI.RST}{queue_suffix}\n",
+                        f"{UI.WHITE}{desc_str}{UI.RST}: {UI.RED}{task.error}{UI.RST}{queue_suffix}\n",
                         flush=True,
                     )
 
@@ -487,8 +493,8 @@ class SubagentManager:
             table.add_column("#", justify="center", style="bold dim", width=5)
             table.add_column("Status", style="bold", width=14)
             table.add_column("Duration", justify="right", width=9)
-            table.add_column("Task Description", style="white")
-            table.add_column("Result / Preview", style="dim")
+            table.add_column("Task Description", style="white", ratio=3, overflow="fold")
+            table.add_column("Result / Preview", style="dim", ratio=3, overflow="fold")
             table.add_column("Injected", justify="center", width=8)
 
             for t in cls._tasks:
@@ -505,8 +511,8 @@ class SubagentManager:
 
                 dur_str = f"{t.duration:.1f}s" if t.duration is not None else (f"{time.time() - t.started_at:.1f}s" if t.started_at else "-")
                 preview = (t.result or t.error or "").replace("\n", " ").strip()
-                if len(preview) > 75:
-                    preview = preview[:75] + "..."
+                if len(preview) > 150:
+                    preview = preview[:147] + "..."
 
                 inj_tag = f"{UI.GREEN}YES{UI.RST}" if t.injected else f"{UI.GRAY}NO{UI.RST}"
 
@@ -514,7 +520,7 @@ class SubagentManager:
                     str(t.id),
                     Text.from_ansi(st),
                     dur_str,
-                    t.description[:60],
+                    t.description,
                     Text.from_ansi(preview),
                     Text.from_ansi(inj_tag),
                 )
@@ -523,11 +529,14 @@ class SubagentManager:
             console.print(table)
             console.print(f"{UI.GRAY}Commands: {UI.CYAN}/subagent view <#>{UI.GRAY} │ {UI.CYAN}/subagent inject <#|all>{UI.GRAY} │ {UI.CYAN}/subagent cancel <#>{UI.RST}\n")
         else:
+            term_cols = shutil.get_terminal_size((120, 24)).columns
+            max_desc = max(60, term_cols - 40)
             print(f"\n{UI.DARK_GRAY}╭─── {UI.WHITE}BACKGROUND SUBAGENTS (NVIDIA CUDA:9001 [{c_badge}]){UI.RST}{UI.DARK_GRAY} ─────────────╮{UI.RST}")
             for t in cls._tasks:
                 dur_str = f"{t.duration:.1f}s" if t.duration is not None else "-"
                 inj_str = " [Injected]" if t.injected else ""
-                print(f"{UI.DARK_GRAY}│{UI.RST}  #{t.id:2d} [{t.status.upper():9s}] ({dur_str:5s}) {UI.WHITE}{t.description[:45]}{UI.RST}{inj_str}")
+                desc_str = t.description if len(t.description) <= max_desc else (t.description[:max_desc - 3] + "...")
+                print(f"{UI.DARK_GRAY}│{UI.RST}  #{t.id:2d} [{t.status.upper():9s}] ({dur_str:5s}) {UI.WHITE}{desc_str}{UI.RST}{inj_str}")
             print(f"{UI.DARK_GRAY}╰──────────────────────────────────────────────────────────────────╯{UI.RST}\n")
 
     @classmethod

@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import time
+import shutil
 import asyncio
 import urllib.request
 import copyreg
@@ -418,12 +419,18 @@ class MultiGpuHybridSession:
             summary = (
                 c_args.get("CommandLine")
                 or c_args.get("AbsolutePath")
+                or c_args.get("TargetFile")
                 or c_args.get("file_path")
                 or c_args.get("Query")
                 or c_args.get("prompt")
+                or c_args.get("Instruction")
+                or c_args.get("task")
                 or ""
             )
-            summary_str = f" ➔ {summary[:70]}" if summary else ""
+            term_cols = shutil.get_terminal_size((120, 24)).columns
+            max_summary = max(100, term_cols - 35)
+            summary_clean = str(summary).replace("\r\n", " ").replace("\n", " ").strip()
+            summary_str = f" ➔ {summary_clean}" if len(summary_clean) <= max_summary else f" ➔ {summary_clean[:max_summary - 3]}..."
             ctx_pill = self.format_context_pill()
             if self.max_tool_steps_per_turn > 0:
                 step_badge = f"{UI.DARK_GRAY}[Step {self._current_turn_tool_count}/{self.max_tool_steps_per_turn} │ {ctx_pill}{UI.DARK_GRAY}]{UI.RST} "
@@ -495,9 +502,12 @@ class MultiGpuHybridSession:
             char_count = len(out_str)
 
             if self.verbose and lines:
+                term_cols = shutil.get_terminal_size((120, 24)).columns
+                max_line = max(100, term_cols - 20)
                 print(f"{UI.DARK_GRAY}  │ [Result preview ({line_count} lines, {char_count} chars)]:{UI.RST}")
                 for l in lines[:10]:
-                    print(f"{UI.DARK_GRAY}  │   {UI.GRAY}{l[:100]}{UI.RST}")
+                    l_str = l if len(l) <= max_line else (l[:max_line - 3] + "...")
+                    print(f"{UI.DARK_GRAY}  │   {UI.GRAY}{l_str}{UI.RST}")
                 if line_count > 10:
                     print(f"{UI.DARK_GRAY}  │   {UI.DARK_GRAY}... (+{line_count - 10} more lines){UI.RST}")
 
@@ -840,11 +850,18 @@ class MultiGpuHybridSession:
                         summary = (
                             params.get("CommandLine")
                             or params.get("AbsolutePath")
+                            or params.get("TargetFile")
+                            or params.get("file_path")
                             or params.get("Query")
+                            or params.get("prompt")
+                            or params.get("Instruction")
                             or params.get("task")
                             or ""
                         )
-                        summary_str = f" ➔ {summary[:55]}" if summary else ""
+                        term_cols = shutil.get_terminal_size((120, 24)).columns
+                        max_summary = max(100, term_cols - 35)
+                        summary_clean = str(summary).replace("\r\n", " ").replace("\n", " ").strip()
+                        summary_str = f" ➔ {summary_clean}" if len(summary_clean) <= max_summary else f" ➔ {summary_clean[:max_summary - 3]}..."
                         tool_msg = f"{UI.AMBER_BOLD}[⚡ Cloud Tool: {tool_name}]{UI.RST}{UI.WHITE}{summary_str}{UI.RST}"
                         if status:
                             status.update(f"[bold yellow]⚙ Cloud Tool: {tool_name}[/bold yellow] [dim]{summary_str}[/dim]")
